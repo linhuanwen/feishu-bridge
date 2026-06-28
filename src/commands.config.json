@@ -1,0 +1,46 @@
+{
+  "commands": [
+    {
+      "id": "screenshot",
+      "aliases": ["截图", "截屏", "screenshot"],
+      "needsArg": false
+    },
+    {
+      "id": "systemStatus",
+      "aliases": ["状态", "温度", "cpu", "status", "系统状态"],
+      "needsArg": false
+    },
+    {
+      "id": "listDirectory",
+      "aliases": ["ls", "dir", "列出", "目录"],
+      "needsArg": true
+    },
+    {
+      "id": "openProgram",
+      "aliases": ["打开", "启动"],
+      "needsArg": true
+    },
+    {
+      "id": "closeProgram",
+      "aliases": ["关闭", "退出", "结束"],
+      "needsArg": true
+    },
+    {
+      "id": "runScript",
+      "aliases": ["运行", "执行脚本", "执行"],
+      "needsArg": true
+    }
+  ],
+  "scriptWhitelist": [
+    "d:\\scripts\\backup.bat",
+    "d:\\scripts\\cleanup.ps1"
+  ],
+  "programMap": {
+    "chrome": { "executable": "chrome.exe", "processName": "chrome.exe" },
+    "edge": { "executable": "msedge.exe", "processName": "msedge.exe" },
+    "记事本": { "executable": "notepad.exe", "processName": "notepad.exe" },
+    "计算器": { "executable": "calc.exe", "processName": "CalculatorApp.exe" },
+    "任务管理器": { "executable": "taskmgr.exe", "processName": "Taskmgr.exe" },
+    "终端": { "executable": "wt.exe", "processName": "WindowsTerminal.exe" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Program Files\\nodejs\\node.exe D:\\tool\\yuancheng\\dist\\permissionBridge.js"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"\nconst http = require('http');\nconst data = JSON.stringify({tool_name:'Bash',tool_input:{command:'echo test forever'},cwd:'D:/ShenJiRuanJian'});\nconst req = http.request({hostname:'127.0.0.1',port:19384,path:'/permission',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(data)}}, res => {\n  let body = '';\n  res.on('data', c => body += c);\n  res.on('end', () => console.log(body));\n});\nreq.write(data);\nreq.end();\n\" 2>&1)",
+      "Bash(node -e \"const fs = require('fs'); const path = require('path'); const home = process.env.USERPROFILE; const projectsDir = path.join(home, '.claude', 'projects'); if (fs.existsSync(projectsDir)) { const dirs = fs.readdirSync(projectsDir); console.log('Projects dirs:', dirs); for (const d of dirs.slice(0, 3)) { const full = path.join(projectsDir, d); const files = fs.readdirSync(full); console.log('\\n---', d, '---'); for (const f of files.slice(0, 10)) { const fp = path.join(full, f); const stat = fs.statSync(fp); console.log(f, stat.size, 'bytes'); if (f === 'meta.json') { try { const meta = JSON.parse(fs.readFileSync(fp, 'utf-8')); console.log('  META:', JSON.stringify(meta).slice(0, 200)); } catch(e) { console.log('  parse error:', e.message); } } } } } else { console.log('No .claude/projects directory'); }\" 2>&1)",
+      "Bash(node -e \"\nconst fs = require('fs');\nconst path = require('path');\nconst home = process.env.USERPROFILE;\nconst projectsDir = path.join(home, '.claude', 'projects', 'd--tool-yuancheng');\nconst files = fs.readdirSync(projectsDir).filter(f => f.endsWith('.jsonl'));\n// Show first line of each session to understand structure\nfor (const f of files.slice(0, 5)) {\n  const content = fs.readFileSync(path.join(projectsDir, f), 'utf-8');\n  const firstLine = content.split('\\n')[0];\n  try {\n    const parsed = JSON.parse(firstLine);\n    console.log(f, '→', JSON.stringify(parsed).slice(0, 300));\n  } catch(e) {\n    console.log(f, '→', firstLine.slice(0, 200));\n  }\n  const lines = content.split('\\n').filter(Boolean);\n  const lastLine = lines[lines.length - 1];\n  try {\n    const parsed = JSON.parse(lastLine);\n    console.log('  last:', JSON.stringify(parsed).slice(0, 200));\n  } catch(e) {}\n  console.log('  lines:', lines.length);\n}\n\" 2>&1)",
+      "Bash(node -e \"\nconst fs = require('fs');\nconst path = require('path');\nconst home = process.env.USERPROFILE;\nconst projectsDir = path.join(home, '.claude', 'projects');\nconst dirs = fs.readdirSync(projectsDir);\n// Test path decoding\nfor (const d of dirs.slice(0, 5)) {\n  const m = d.match(/^([a-zA-Z])--(.+)$/);\n  if (m) {\n    const decoded = m[1] + ':\\\\' + m[2].replace(/-/g, '\\\\');\n    const exists = fs.existsSync(decoded);\n    console.log(d, '→', decoded, 'exists:', exists);\n  }\n}\n// Also check the total session count\nlet total = 0;\nfor (const d of dirs) {\n  const fp = path.join(projectsDir, d);\n  if (fs.statSync(fp).isDirectory()) {\n    const jsonl = fs.readdirSync(fp).filter(f => f.endsWith('.jsonl'));\n    total += jsonl.length;\n  }\n}\nconsole.log('Total sessions:', total);\n\" 2>&1)",
+      "Bash(node -e \"const fs = require('fs'); const path = require('path'); const home = process.env.USERPROFILE; const projectsDir = path.join(home, '.claude', 'projects'); const dirs = fs.readdirSync(projectsDir); for (const d of dirs.slice(0, 5)) { const m = d.match(/^([a-zA-Z])--(.+)$/); if (m) { const decoded = m[1] + ':' + String.fromCharCode(92) + m[2].replace(/-/g, String.fromCharCode(92)); const exists = fs.existsSync(decoded); console.log(d, '->', decoded, 'exists:', exists); } } let total = 0; for (const d of dirs) { const fp = path.join(projectsDir, d); if (fs.statSync(fp).isDirectory()) { const jsonl = fs.readdirSync(fp).filter(f => f.endsWith('.jsonl')); total += jsonl.length; } } console.log('Total sessions:', total);\" 2>&1)",
+      "Bash(cd d:/tool/yuancheng && npx tsc --noEmit 2>&1)",
+      "Bash(cd d:/tool/yuancheng && npm run build 2>&1)",
+      "Bash(cd d:/tool/yuancheng && npm test 2>&1)",
+      "Bash(taskkill /F /IM node.exe /FI \"WINDOWTITLE eq *feishu*\" 2>&1 || true; sleep 1; cd d:/tool/yuancheng && node --env-file=.env --import tsx/esm src/main.ts 2>&1 &)",
+      "Bash(node -e \"const { execSync } = require('child_process'); try { execSync('taskkill /F /IM node.exe 2>&1'); } catch(e) {}\" 2>&1; echo \"done killing node processes\")"
+    ]
+  }
+}

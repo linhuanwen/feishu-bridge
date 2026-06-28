@@ -1,0 +1,31 @@
+{
+  "name": "feishu-bridge",
+  "version": "0.1.0",
+  "description": "本地智能路由层 + 飞书远程操控电脑",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node --env-file=.env --import tsx/esm src/main.ts",
+    "dev": "node --env-file=.env --import tsx/esm src/main.ts",
+    "build": "tsc",
+    "evaluate": "tsx src/evaluateClassifier.ts"
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "openclaw",
+    "remote-control"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.48.0",
+    "node-pty": "^1.1.0"
+  }
+}
