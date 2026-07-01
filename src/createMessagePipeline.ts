@@ -97,6 +97,7 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
   async function guardedExecute(
     chatId: string,
     message: string,
+    openId: string | undefined,
     logger: (msg: string) => void,
   ): Promise<CommandReply | null> {
     if (!permissionGate) {
@@ -119,6 +120,8 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
         if (result.kind === "image") return `📷 截图已生成: ${result.filePath}`;
         return result.content;
       },
+      undefined, // timeoutMs 使用默认值
+      openId,
     );
 
     if (guardResult.status === "allowed" || guardResult.status === "allowed_always") {
@@ -142,13 +145,16 @@ export function createMessagePipeline(deps: MessagePipelineDeps) {
     event: FeishuMessageEvent,
     ctx,
   ) => {
+    const openId = event.sender?.sender_id?.open_id;
     await handleClassifiedMessage(event, {
       sendReply: ctx.sendReply,
       sendImageReply: ctx.sendImageReply,
+      sendPostReply: ctx.sendPostReply,
+      deleteMessage: ctx.deleteMessage,
       classifyIntent,
       isSenderAllowed,
       executeSimpleCommand: async (message: string) =>
-        guardedExecute(event.message.chat_id, message, ctx.logger),
+        guardedExecute(event.message.chat_id, message, openId, ctx.logger),
       executeInquire,
       executeTask,
       logger: ctx.logger,

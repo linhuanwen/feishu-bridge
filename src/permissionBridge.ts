@@ -1,17 +1,22 @@
 /**
  * Claude Code Permission Hook Bridge
  *
- * Claude Code 在需要权限确认时调用此脚本：
- * 1. 从 stdin 读取 JSON（包含 tool_name, tool_input）
- * 2. POST 到 Feishu Bridge 的 HTTP 服务器
- * 3. HTTP 服务器通过飞书卡片让你在手机上确认
- * 4. 将决策写回 stdout → Claude Code 继续/拒绝
+ * 支持 PreToolUse 和 PermissionRequest 两种 hook 事件：
+ * - PreToolUse: 在 VSCode 扩展和 CLI 中都能触发（推荐）
+ * - PermissionRequest: 仅在 CLI 中触发（保留兼容）
+ *
+ * 流程：
+ * 1. 从 stdin 读取 JSON（包含 hook_event_name, tool_name, tool_input）
+ * 2. 安全工具（Read/Glob/Grep）→ 直接放行
+ * 3. 危险工具（Bash/Write/Edit 等）→ POST 到 Bridge HTTP 服务器
+ * 4. Bridge 通过飞书卡片发送到手机确认
+ * 5. 将决策写回 stdout → Claude Code 继续/拒绝
  *
  * 用法（在 .claude/settings.json 中配置）：
  *   "hooks": {
- *     "Permission": [{
+ *     "PreToolUse": [{
  *       "matcher": "*",
- *       "command": "node d:/tool/yuancheng/dist/permissionBridge.js"
+ *       "hooks": [{ "type": "command", "command": "node d:/tool/yuancheng/dist/permissionBridge.js" }]
  *     }]
  *   }
  */
@@ -21,6 +26,26 @@ import * as http from "http";
 const BRIDGE_PORT = parseInt(process.env.FEISHU_PERMISSION_PORT ?? "19384", 10);
 const BRIDGE_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 120_000; // 2 分钟等待用户确认
+
+// ── 安全工具列表（直接放行，不经过 bridge）──
+
+const SAFE_TOOLS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "List",
+  "Task",       // sub-agent 自身会有权限检查
+  "Question",
+  "TodoWrite",
+  "TaskOutput",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
+
+/** 不需要用户确认的工具直接放行 */
+function isSafeTool(toolName: string): boolean {
+  return SAFE_TOOLS.has(toolName);
+}
 
 // ── stdin 读取 ──
 
@@ -86,11 +111,41 @@ function postPermissionRequest(payload: unknown): Promise<string> {
   });
 }
 
+// ── 输出格式 ──
+
+interface HookRequest {
+  hook_event_name?: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  cwd?: string;
+}
+
+/** 构建 PreToolUse 响应 */
+function buildPreToolUseOutput(decision: "allow" | "deny", reason: string): object {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: decision,
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
+/** 构建 PermissionRequest 响应（兼容旧版 CLI） */
+function buildPermissionRequestOutput(behavior: "allow" | "deny"): object {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: { behavior },
+    },
+  };
+}
+
 // ── 主逻辑 ──
 
 async function main(): Promise<void> {
   try {
-    // 调试：记录每次调用，确认 Claude Code 是否真的调起了这个脚本
+    // 调试：记录每次调用
     try {
       const fs = await import("fs");
       fs.appendFileSync(
@@ -99,53 +154,61 @@ async function main(): Promise<void> {
       );
     } catch { /* 静默 */ }
 
-    // 1. 读取 Claude Code 发来的权限请求
+    // 1. 读取 Claude Code 发来的请求
     const raw = await readStdin();
-    let request: Record<string, unknown> = {};
+    let request: HookRequest = {};
     try {
       request = JSON.parse(raw.trim() || "{}");
     } catch {
       // stdin 为空或无效 JSON → 可能是预检调用，直接放行
-      process.stdout.write(JSON.stringify({ decision: "allow" }));
+      process.stdout.write(JSON.stringify(buildPermissionRequestOutput("allow")));
       return;
     }
 
-    // 2. 发给 Bridge HTTP 服务器（→ 飞书卡片 → 等待用户点击）
+    const hookEvent = request.hook_event_name ?? "PermissionRequest";
+    const toolName = request.tool_name ?? "unknown";
+
+    // 2. 安全工具直接放行（不经过 bridge，零延迟）
+    if (hookEvent === "PreToolUse" && isSafeTool(toolName)) {
+      process.stdout.write(JSON.stringify(
+        buildPreToolUseOutput("allow", `安全工具 ${toolName} 直接放行`),
+      ));
+      return;
+    }
+
+    // 3. 危险工具 → 发给 Bridge HTTP 服务器（→ 飞书卡片 → 等待用户点击）
     const responseRaw = await postPermissionRequest(request);
 
-    // 3. 解析 Bridge 返回的决策
+    // 4. 解析 Bridge 返回的决策
     let response: { decision?: string } = {};
     try {
       response = JSON.parse(responseRaw);
     } catch {
-      // 解析失败
+      // 解析失败，默认拒绝
     }
 
-    // 4. 写回 stdout（Claude Code PermissionRequest hook 格式）
     const allowed = response.decision === "allowed";
-    const hookOutput = {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: {
-          behavior: allowed ? "allow" as const : "deny" as const,
-        },
-      },
-    };
-    process.stdout.write(JSON.stringify(hookOutput));
+
+    // 5. 根据 hook 类型写回 stdout
+    if (hookEvent === "PreToolUse") {
+      process.stdout.write(JSON.stringify(
+        buildPreToolUseOutput(
+          allowed ? "allow" : "deny",
+          allowed ? "用户已在飞书确认" : "用户拒绝或超时",
+        ),
+      ));
+    } else {
+      process.stdout.write(JSON.stringify(
+        buildPermissionRequestOutput(allowed ? "allow" : "deny"),
+      ));
+    }
   } catch (err) {
     // 任何异常 → 安全回退到 deny
     console.error(
       `[PermissionBridge] 异常: ${err instanceof Error ? err.message : String(err)}`,
     );
-    const hookOutput = {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: {
-          behavior: "deny" as const,
-        },
-      },
-    };
-    process.stdout.write(JSON.stringify(hookOutput));
+    // 尝试根据 hook 类型回退（不知道类型则用 PermissionRequest 格式）
+    process.stdout.write(JSON.stringify(buildPermissionRequestOutput("deny")));
   }
 }
 

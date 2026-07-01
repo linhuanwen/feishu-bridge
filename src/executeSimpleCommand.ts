@@ -55,11 +55,17 @@ export function matchCommand(
         // 尝试「别名 参数」（有空格）
         const withSpace = alias + " ";
         if (trimmed.startsWith(withSpace)) {
-          return { commandId: cmd.id, arg: trimmed.slice(withSpace.length).trim() };
+          const arg = trimmed.slice(withSpace.length).trim();
+          if (!isArgExcludedForAlias(alias, arg)) {
+            return { commandId: cmd.id, arg };
+          }
         }
         // 尝试「别名参数」（中文风格，无空格，如"打开Chrome"）
         if (trimmed.startsWith(alias) && trimmed.length > alias.length) {
-          return { commandId: cmd.id, arg: trimmed.slice(alias.length).trim() };
+          const arg = trimmed.slice(alias.length).trim();
+          if (!isArgExcludedForAlias(alias, arg)) {
+            return { commandId: cmd.id, arg };
+          }
         }
       } else {
         // 无参指令：完全匹配
@@ -70,6 +76,23 @@ export function matchCommand(
     }
   }
   return null;
+}
+
+/**
+ * 防御层：避免 simple 指令别名误匹配会话管理命令。
+ * 例如 "列出对话" 不应被 "列出" 别名捕获为 listDirectory("对话")。
+ */
+function isArgExcludedForAlias(alias: string, arg: string): boolean {
+  // "列出" / "目录" / "ls" / "dir" 的参数不能以会话关键词开头
+  if (["ls", "dir", "列出", "目录"].includes(alias)) {
+    const sessionKeywords = /^(对话|会话)/i;
+    if (sessionKeywords.test(arg)) return true;
+  }
+  // "关闭" 的参数不应是 "对话"（避免与 Claude Code 的 / 命令概念混淆）
+  if (["关闭", "退出", "结束"].includes(alias)) {
+    if (/^对话/i.test(arg)) return true;
+  }
+  return false;
 }
 
 export async function executeSimpleCommand(

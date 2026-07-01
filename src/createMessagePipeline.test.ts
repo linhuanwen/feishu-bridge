@@ -16,7 +16,7 @@ describe("createMessagePipeline", () => {
       }),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const event: FeishuMessageEvent = {
       message: {
         message_id: "om_ls",
@@ -51,7 +51,7 @@ describe("createMessagePipeline", () => {
       listDirectory: vi.fn(),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const event: FeishuMessageEvent = {
       message: {
         message_id: "om_eve",
@@ -75,6 +75,7 @@ describe("createMessagePipeline", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_eve"),
+  expect.any(String),
     );
   });
 
@@ -85,7 +86,7 @@ describe("createMessagePipeline", () => {
       listDirectory: vi.fn(),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const event: FeishuMessageEvent = {
       message: {
         message_id: "om_task",
@@ -106,7 +107,7 @@ describe("createMessagePipeline", () => {
       logger: () => {},
     });
 
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task", expect.any(String));
   });
 });
 
@@ -138,7 +139,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
       }),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeInquireEvent("看看 d:\\data\\report.xlsx"), {
       sendReply,
       now: () => new Date(),
@@ -148,6 +149,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("Sheet1"),
+  expect.any(String),
     );
   });
 
@@ -159,7 +161,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
       executeInquire: vi.fn(),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(
       makeInquireEvent("读一下 secret.txt"),
       { sendReply, now: () => new Date(), logger: () => {} },
@@ -168,6 +170,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_alice"),
+  expect.any(String),
     );
   });
 
@@ -182,7 +185,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
       }),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(
       makeInquireEvent("读一下 huge.pdf"),
       { sendReply, now: () => new Date(), logger: () => {} },
@@ -191,6 +194,7 @@ describe("createMessagePipeline — inquire 文件查询", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("超时"),
+  expect.any(String),
     );
   });
 
@@ -202,13 +206,13 @@ describe("createMessagePipeline — inquire 文件查询", () => {
       // 不传 executeInquire
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(
       makeInquireEvent("读一下 test.md"),
       { sendReply, now: () => new Date(), logger: () => {} },
     );
 
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：inquire");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：inquire", expect.any(String));
   });
 });
 
@@ -268,7 +272,7 @@ describe("createMessagePipeline — 集成 PermissionGate", () => {
       permissionGate: gate,
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeEvent("ls D:\\"), {
       sendReply,
       now: () => new Date(),
@@ -288,7 +292,7 @@ describe("createMessagePipeline — 集成 PermissionGate", () => {
       permissionGate: gate,
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeEvent("ls D:\\"), {
       sendReply,
       now: () => new Date(),
@@ -296,7 +300,7 @@ describe("createMessagePipeline — 集成 PermissionGate", () => {
     });
 
     expect(gate.guard).toHaveBeenCalledTimes(1);
-    expect(sendReply).toHaveBeenCalledWith("oc_456", expect.stringContaining("已取消"));
+    expect(sendReply).toHaveBeenCalledWith("oc_456", expect.stringContaining("已取消"), expect.any(String));
   });
 
   it("高危指令通过确认门 → 超时 → 不执行，回复「已取消」", async () => {
@@ -306,7 +310,7 @@ describe("createMessagePipeline — 集成 PermissionGate", () => {
       permissionGate: gate,
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeEvent("ls D:\\"), {
       sendReply,
       now: () => new Date(),
@@ -314,14 +318,14 @@ describe("createMessagePipeline — 集成 PermissionGate", () => {
     });
 
     expect(gate.guard).toHaveBeenCalledTimes(1);
-    expect(sendReply).toHaveBeenCalledWith("oc_456", expect.stringContaining("已取消"));
+    expect(sendReply).toHaveBeenCalledWith("oc_456", expect.stringContaining("已取消"), expect.any(String));
   });
 
   it("未配置 permissionGate 时原有行为不变（向后兼容）", async () => {
     const deps = makeBaseDeps();
     const pipeline = createMessagePipeline(deps);
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeEvent("ls D:\\"), {
       sendReply,
       now: () => new Date(),
@@ -362,7 +366,7 @@ describe("createMessagePipeline — task 会话管理", () => {
       }),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeTaskEvent("审查 d:\\tool\\yuancheng 的代码"), {
       sendReply,
       now: () => new Date(),
@@ -372,6 +376,7 @@ describe("createMessagePipeline — task 会话管理", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("代码审查结果"),
+  expect.any(String),
     );
   });
 
@@ -383,7 +388,7 @@ describe("createMessagePipeline — task 会话管理", () => {
       executeTask: vi.fn(),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeTaskEvent("审查代码"), {
       sendReply,
       now: () => new Date(),
@@ -393,6 +398,7 @@ describe("createMessagePipeline — task 会话管理", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_alice"),
+  expect.any(String),
     );
   });
 
@@ -407,7 +413,7 @@ describe("createMessagePipeline — task 会话管理", () => {
       }),
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeTaskEvent("审查 d:\\tool 代码"), {
       sendReply,
       now: () => new Date(),
@@ -417,6 +423,7 @@ describe("createMessagePipeline — task 会话管理", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("任务执行失败"),
+  expect.any(String),
     );
   });
 
@@ -428,13 +435,13 @@ describe("createMessagePipeline — task 会话管理", () => {
       // 不传 executeTask
     });
 
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     await pipeline.onMessage(makeTaskEvent("审查代码"), {
       sendReply,
       now: () => new Date(),
       logger: () => {},
     });
 
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task", expect.any(String));
   });
 });

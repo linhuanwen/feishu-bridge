@@ -4,7 +4,7 @@ import { execFile } from "child_process";
 import * as http from "http";
 import * as path from "path";
 import { createFeishuBridge } from "./createFeishuBridge.js";
-import { createOllamaClassifier } from "./createOllamaClassifier.js";
+import { createDeepSeekClassifier } from "./createDeepSeekClassifier.js";
 import { classifyIntent } from "./classifyIntent.js";
 import { listDirectory } from "./listDirectory.js";
 import { isSenderAllowed } from "./isSenderAllowed.js";
@@ -13,7 +13,7 @@ import { executeInquire } from "./executeInquire.js";
 import { executeTask } from "./executeTask.js";
 import { createSessionRegistry } from "./sessionRegistry.js";
 import { discoverClaudeSessions } from "./discoverClaudeSessions.js";
-import { runClaudeInteractive } from "./runClaude.js";
+import { runClaudeInteractive, runClaudePrint } from "./runClaude.js";
 import { captureScreenshot } from "./captureScreenshot.js";
 import { getSystemStatus, formatSystemStatus } from "./getSystemStatus.js";
 import { openProgram, closeProgram } from "./programManager.js";
@@ -75,16 +75,18 @@ if (allowedIds.length === 0) {
 // 通知目标 chat_id（用于健康检查等系统通知）
 const notifyChatId = process.env.FEISHU_NOTIFY_CHAT_ID ?? "";
 
-const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
-const ollamaModel = process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+const deepseekApiKey = getEnv("DEEPSEEK_API_KEY");
+const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+const deepseekModel = process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
 const taskTimeoutMs = parseInt(
-  process.env.FEISHU_TASK_TIMEOUT_MS ?? "300000",
+  process.env.FEISHU_TASK_TIMEOUT_MS ?? "900000",
   10,
 );
 
-const callOllama = createOllamaClassifier({
-  baseUrl: ollamaBaseUrl,
-  model: ollamaModel,
+const callAI = createDeepSeekClassifier({
+  apiKey: deepseekApiKey,
+  baseUrl: deepseekBaseUrl,
+  model: deepseekModel,
 });
 
 /** Claude Code CLI 路径：优先使用环境变量，然后自动发现 VSCode 扩展中的最新版本，最后回退到 PATH */
@@ -126,18 +128,28 @@ function resolveClaudePath(): string {
 }
 const CLAUDE_CLI_PATH = resolveClaudePath();
 
-/** 调用 Claude Code CLI 单次查询，超时自动终止。使用 execFile 避免 shell 注入。 */
+/**
+ * 调用 Claude Code CLI 单次查询（inquire 路径）。
+ * 使用 -p 模式（输出干净、快速，读取文件不需要权限确认）。
+ */
 function callClaude(prompt: string, timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(CLAUDE_CLI_PATH, ["-p", prompt], { timeout: timeoutMs }, (error, stdout, stderr) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      const output = stdout.trim() || stderr.trim();
-      resolve(output);
-    });
-  });
+  // bridgeRootDir 是 src/（tsx）或 dist/（编译后），.. 到项目根目录
+  const projectDir = path.resolve(bridgeRootDir, "..");
+  log(`[callClaude/inquire] -p（新会话）, projectDir=${projectDir}, timeoutMs=${timeoutMs}`);
+  return runClaudePrint(prompt, {
+    projectDir,
+    timeoutMs,
+    claudePath: CLAUDE_CLI_PATH,
+  }).then(
+    (output) => {
+      log(`[callClaude/inquire] 完成: outputLen=${output.length}`);
+      return output;
+    },
+    (err) => {
+      log(`[callClaude/inquire] 失败: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    },
+  );
 }
 
 // ── 会话注册表 ──
@@ -158,41 +170,50 @@ setInterval(() => {
   }
 }, SESSION_CLEANUP_INTERVAL_MS);
 
-/** 调用 Claude Code CLI（支持 session）。首调用 -p 模式创建会话，后续用 PTY 交互模式触发权限 hook。 */
+/**
+ * 调用 Claude Code CLI。
+ * - 新会话（无 sessionId）：-p 模式，输出干净，不触发主题选择器
+ * - 续接会话（有 sessionId）：PTY 交互模式，PermissionRequest hook → 飞书卡片
+ */
 function callClaudeForTask(
   prompt: string,
-  opts: { projectDir: string; sessionId?: string; timeoutMs: number },
+  opts: { projectDir: string; sessionId?: string; timeoutMs: number; forcePrint?: boolean; onProgress?: (elapsedMs: number, pid: number) => void },
 ): Promise<string> {
-  // 有 sessionId = 续接已有会话 → 用 PTY 交互模式（支持 PermissionRequest hook → 飞书卡片）
-  if (opts.sessionId) {
-    return runClaudeInteractive(prompt, {
-      projectDir: opts.projectDir,
-      sessionId: opts.sessionId,
-      timeoutMs: opts.timeoutMs,
-      claudePath: CLAUDE_CLI_PATH,
-    });
-  }
+  // 统一使用 -p 模式（print，非交互）。
+  //
+  // 原因：-p 模式创建的 session 不带 deferred tool marker，
+  // PTY 交互模式 --resume 无法加载这类 session，会回退到欢迎界面。
+  // -p --resume 则能正确加载 session 并继续对话。
+  //
+  // 代价：-p 模式不触发 PermissionRequest hook，
+  // 但 ensureClaudeSettings 已预授权常用工具（Read/Glob/Grep/Bash/Write/Edit），
+  // 日常使用不受影响。
+  //
+  // forcePrint 参数保留用于向后兼容（已是 -p 模式，无实际操作）。
+  const label = opts.sessionId
+    ? `-p --resume: sessionId=${opts.sessionId.slice(0, 8)}...`
+    : `-p（新会话）`;
+  log(`[callClaude] ${label}, projectDir=${opts.projectDir}`);
 
-  // 无 sessionId = 首次调用创建新会话 → 用 -p 模式（快速、无交互）
-  return new Promise((resolve, reject) => {
-    const args = ["-p", prompt];
-    execFile(
-      CLAUDE_CLI_PATH,
-      args,
-      { cwd: opts.projectDir, timeout: opts.timeoutMs },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        const output = stdout.trim() || stderr.trim() || "";
-        resolve(output);
-      },
-    );
-  });
+  return runClaudePrint(prompt, {
+    projectDir: opts.projectDir,
+    sessionId: opts.sessionId,
+    timeoutMs: opts.timeoutMs,
+    claudePath: CLAUDE_CLI_PATH,
+    onProgress: opts.onProgress,
+  }).then(
+    (output) => {
+      log(`[callClaude] ${label} 完成: outputLen=${output.length}`);
+      return output;
+    },
+    (err) => {
+      log(`[callClaude] ${label} 失败: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    },
+  );
 }
 
-/** 调用 Claude Code CLI 交互模式（无 -p，支持 / 命令） */
+/** 调用 Claude Code CLI 交互模式（PTY，支持 PermissionRequest hook） */
 function callClaudeInteractive(
   input: string,
   opts: { projectDir: string; sessionId?: string; timeoutMs: number },
@@ -213,6 +234,10 @@ function formatError(err: unknown): string {
   const type = classifyError(message);
   return formatErrorMessage({ type, detail: message });
 }
+
+// ── 用户 open_id（来自最近一条消息，用于 HTTP 权限路径的卡片推送）──
+
+let lastKnownOpenId: string | undefined;
 
 // ── 高危操作确认门配置 ──
 
@@ -263,10 +288,25 @@ async function ensureClaudeSettings(projectDir: string): Promise<void> {
   const bridgeScriptPath = path.join(bridgeRootDir, "..", "dist", "permissionBridge.js");
   const nodePath = process.execPath; // Node.js 可执行文件路径
 
-  // 构建 Claude Code settings（PermissionRequest hook 格式）
+  // 构建安全预授权规则
+  // - Read/Glob/Grep 始终安全
+  // - 危险工具（Bash/Write/Edit 等）预授权以绕过 VSCode 原生权限对话框
+  //   实际权限门禁由 PreToolUse hook → Bridge 飞书卡片完成
+  // Claude Code 在 Windows 上使用 //d/path 格式（Git Bash 风格），反斜杠路径不识别
+  const unixDir = projectDir.replace(/\\/g, "/").replace(/^([a-zA-Z]):/, "//$1");
+  const safeAllowRules = [
+    "Read(**/*)",
+    "Glob(**/*)",
+    "Grep(* *)",
+    `Write(${unixDir}/**)`,
+  ];
+
+  // PreToolUse hook（在 VSCode 扩展和 CLI 中都能触发，不同于 PermissionRequest 仅 CLI 可用）
+  // 安全工具（Read/Glob/Grep）在 permissionBridge.js 中直接放行，
+  // 危险工具（Bash/Write/Edit）通过 Bridge HTTP → 飞书卡片确认
   const hooksConfig = {
     hooks: {
-      PermissionRequest: [
+      PreToolUse: [
         {
           matcher: "*",
           hooks: [
@@ -276,6 +316,16 @@ async function ensureClaudeSettings(projectDir: string): Promise<void> {
       ],
     },
   };
+
+  // 预授权所有危险工具类型（绕过 VSCode 原生权限弹窗，由 PreToolUse 统一门禁）
+  const broadAllowRules = [
+    "Bash",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "WebSearch",
+    "WebFetch",
+  ];
 
   const settingsPath = path.join(projectDir, ".claude", "settings.json");
   const claudeDir = path.dirname(settingsPath);
@@ -295,8 +345,22 @@ async function ensureClaudeSettings(projectDir: string): Promise<void> {
       // 文件不存在，使用空配置
     }
 
-    // 合并 hooks（保留已有的其他 hooks）
-    const merged = { ...existing, ...hooksConfig };
+    // 合并 permissions.allow（保留已有的 + 追加安全规则，去重）
+    const existingPermissions = (existing.permissions as Record<string, unknown>) ?? {};
+    const existingAllow: string[] = Array.isArray(existingPermissions.allow)
+      ? existingPermissions.allow
+      : [];
+    const mergedAllow = [...new Set([...existingAllow, ...safeAllowRules, ...broadAllowRules])];
+
+    // 构建完整配置
+    const merged = {
+      ...existing,
+      ...hooksConfig,
+      permissions: {
+        ...existingPermissions,
+        allow: mergedAllow,
+      },
+    };
 
     const { writeFile } = await import("fs/promises");
     await writeFile(
@@ -305,7 +369,7 @@ async function ensureClaudeSettings(projectDir: string): Promise<void> {
       "utf-8",
     );
 
-    log(`[ClaudeSettings] 已为 ${projectDir} 生成 .claude/settings.json（含权限桥 hook）`);
+    log(`[ClaudeSettings] 已为 ${projectDir} 生成 .claude/settings.json（含预授权 + PreToolUse hook）`);
   } catch (err) {
     log(
       `[ClaudeSettings] 写入失败 ${projectDir}: ${err instanceof Error ? err.message : String(err)}`,
@@ -451,9 +515,9 @@ function buildConfirmedCard(
 }
 
 const safeConfirmationSender: ConfirmationSender = {
-  sendCard: async (chatId: string, title: string, description: string) => {
+  sendCard: async (chatId: string, title: string, description: string, openId?: string) => {
     const card = buildConfirmationCard(title, description);
-    const { message_id } = await bridge.sendCard(chatId, card);
+    const { message_id } = await bridge.sendCard(chatId, card, openId);
 
     if (!message_id) {
       // 卡片发送失败 → 发文本消息兜底
@@ -562,7 +626,7 @@ const permissionGate = createPermissionGate({
 // ── 消息管道 ──
 
 const pipeline = createMessagePipeline({
-  classifyIntent: (message) => classifyIntent(message, { callOllama }),
+  classifyIntent: (message) => classifyIntent(message, { callAI }),
   isSenderAllowed: (openId) => isSenderAllowed(openId, allowedIds),
   listDirectory,
   executeInquire: (message) => executeInquire(message, { callClaude }),
@@ -576,6 +640,10 @@ const pipeline = createMessagePipeline({
       taskTimeoutMs,
       ensureClaudeSettings,
       discoverSessions: discoverClaudeSessions,
+      defaultProjectDir: "D:\\tool\\yuancheng",
+      sendProgress: async (chatId: string, message: string) => {
+        await bridge.sendTextMessage(chatId, message).catch(() => {});
+      },
     }),
   permissionGate,
   commandConfig,
@@ -600,18 +668,24 @@ const feishuClient = new lark.Client({
   domain: lark.Domain.Feishu,
 }) as any;
 
-/** 向指定 chat_id 发送飞书消息 */
+/** 向指定 chat_id 发送飞书消息（带 10s 超时，不阻塞启动） */
 async function sendFeishuNotification(chatId: string, text: string): Promise<void> {
   if (!chatId) return; // 未配置通知目标则跳过
   try {
-    await feishuClient.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        content: JSON.stringify({ text }),
-        msg_type: "text",
-      },
-    });
+    const result = await Promise.race([
+      feishuClient.im.v1.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chatId,
+          content: JSON.stringify({ text }),
+          msg_type: "text",
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("超时")), 10_000),
+      ),
+    ]);
+    void result;
   } catch (err) {
     log(`[Notification] 发送飞书通知失败: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -629,8 +703,18 @@ const bridge = createFeishuBridge({
     }) as any,
   createEventDispatcher: () => new lark.EventDispatcher({}) as any,
   logger: (msg) => log(`[FeishuBridge] ${msg}`),
-  onMessage: pipeline.onMessage,
-  onCardAction: handleCardAction,
+  onMessage: async (event, ctx) => {
+    // 从消息中提取用户 open_id，用于 HTTP 权限路径的卡片推送
+    const openId = event.sender?.sender_id?.open_id;
+    if (openId) lastKnownOpenId = openId;
+    return pipeline.onMessage!(event, ctx);
+  },
+  onCardAction: async (event) => {
+    // 从卡片点击事件中也捕获 open_id，防止重启后尚无消息时 HTTP 路径回退到 chat_id
+    const openId = event.open_id || event.operator?.open_id;
+    if (openId) lastKnownOpenId = openId;
+    return handleCardAction(event);
+  },
 });
 
 // ── 权限桥 HTTP Server ──
@@ -663,7 +747,8 @@ async function requestPermissionViaCard(
   }
 
   const card = buildConfirmationCard(title, description, projectDir);
-  const { message_id } = await bridge.sendCard(chatId, card);
+  const openId = lastKnownOpenId;
+  const { message_id } = await bridge.sendCard(chatId, card, openId);
 
   if (!message_id) {
     // 卡片发送失败 → 发文本消息兜底，直接拒绝
@@ -853,10 +938,12 @@ function readRequestBody(req: http.IncomingMessage): Promise<string> {
 
 const healthChecks: HealthCheck[] = [
   {
-    name: "Ollama",
+    name: "DeepSeek API",
     check: async () => {
       try {
-        const res = await fetch(`${ollamaBaseUrl}/api/tags`);
+        const res = await fetch(`${deepseekBaseUrl}/v1/models`, {
+          headers: { Authorization: `Bearer ${deepseekApiKey}` },
+        });
         return { healthy: res.ok, detail: res.ok ? undefined : `HTTP ${res.status}` };
       } catch (err) {
         return { healthy: false, detail: err instanceof Error ? err.message : "连接失败" };
@@ -975,6 +1062,13 @@ log("[Permission] 权限日志与 settings writer 已初始化");
 
 try {
   // 启动权限桥 HTTP 服务器
+  permissionServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      log(`[PermissionHTTP] ⚠️ 端口 ${PERMISSION_PORT} 已被占用，跳过 HTTP 服务器启动`);
+    } else {
+      log(`[PermissionHTTP] 服务器错误: ${err.message}`);
+    }
+  });
   permissionServer.listen(PERMISSION_PORT, "127.0.0.1", () => {
     log(`[PermissionHTTP] 权限桥 HTTP 服务器已启动: http://127.0.0.1:${PERMISSION_PORT}`);
   });
@@ -983,13 +1077,19 @@ try {
   healthChecker.start();
   log("[HealthCheck] 健康检查已启动");
 
-  // 发送上线通知
+  // 发送上线通知（后台发送，不阻塞网关启动）
+  log(`[Startup] notifyChatId = "${notifyChatId}" (len=${notifyChatId.length})`);
   if (notifyChatId) {
-    await sendFeishuNotification(notifyChatId, "✅ Feishu Bridge 已在线");
-    log("[Notification] 已发送上线通知");
+    log("[Startup] 开始发送上线通知（后台）…");
+    void sendFeishuNotification(notifyChatId, "✅ Feishu Bridge 已在线").then(() => {
+      log("[Notification] 已发送上线通知");
+    });
+  } else {
+    log("[Startup] ⚠️ 未配置 notifyChatId，跳过上线通知");
   }
 
   // 启动网关（带崩溃自动重启）
+  log("[Startup] 开始启动网关…");
   await restartable.start();
 } catch (err) {
   log(`[Fatal] 启动失败: ${err instanceof Error ? err.message : String(err)}`);

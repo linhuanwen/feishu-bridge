@@ -45,12 +45,14 @@ export type PermissionGate = {
    *   - 允许 → 执行
    *   - 拒绝 → 取消
    *   - 超时 → 取消（默认 60 秒）
+   * - openId: p2p 私聊时传入用户 open_id，确保卡片能推送到手机
    */
   guard: (
     chatId: string,
     operation: Operation,
     execute: () => Promise<string>,
     timeoutMs?: number,
+    openId?: string,
   ) => Promise<GuardResult>;
 };
 
@@ -67,6 +69,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
     operation: Operation,
     execute: () => Promise<string>,
     timeoutMs = 60_000,
+    openId?: string,
   ): Promise<GuardResult> {
     if (!isHighRisk(operation.action)) {
       // 低危操作：直接执行
@@ -91,6 +94,7 @@ export function createPermissionGate(deps: PermissionGateDeps): PermissionGate {
       chatId,
       title,
       description,
+      openId,
     );
 
     log(`[PermissionGate] 已发送确认卡片，messageId: ${messageId}`);

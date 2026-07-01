@@ -1,0 +1,22 @@
+# 飞书配置
+# 获取方式：https://open.feishu.cn/ → 工作管家应用 → 凭证与基础信息
+
+# 主应用（用于读取多维表格，需 bitable 权限）
+app_id: "your_app_id"
+app_secret: "your_app_secret"
+
+# 群自定义机器人 Webhook（用于发送消息）
+webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx"
+
+# 推送专用应用（用于发消息到群，需 im:message:send 权限，且已在目标群内）
+chat_app_id: "your_chat_app_id"
+chat_app_secret: "your_chat_app_secret"
+
+# 目标推送群聊（Bot API 直接发消息到该群，不受 webhook 关键词限制）
+target_chat_name: "每日报告"
+target_chat_id: "your_target_chat_id"
+
+# 多维表格
+bitable:
+  app_token: "your_bitable_app_token"
+  table_id: "your_table_id"

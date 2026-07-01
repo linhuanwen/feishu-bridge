@@ -1,5 +1,5 @@
 import { spawn as spawnPty } from "node-pty";
-import { execFile } from "child_process";
+import { spawn } from "child_process";
 
 /** claude 子进程执行选项 */
 export type ClaudeRunOptions = {
@@ -7,15 +7,25 @@ export type ClaudeRunOptions = {
   projectDir: string;
   /** Claude Code 会话 UUID（用于 --resume） */
   sessionId?: string;
-  /** 超时时间（毫秒），默认 300_000（5 分钟） */
+  /** 超时时间（毫秒），默认 900_000（15 分钟） */
   timeoutMs?: number;
   /** Claude CLI 路径 */
   claudePath: string;
+  /**
+   * 可选：进度心跳回调。
+   * 在子进程运行期间每 30 秒触发一次，用于向用户发送「任务仍在进行中」的提醒。
+   * 进程退出（正常/异常/超时）后不再触发。
+   */
+  onProgress?: (elapsedMs: number, pid: number) => void;
 };
 
 /**
  * 使用 -p 模式运行 Claude Code（不支持 / 命令，但速度快、输出干净）。
  * 适用于普通任务消息。
+ *
+ * 使用 spawn（而非 execFile）以获得：
+ * 1. stdio 控制 — 显式忽略 stdin，避免 Claude Code 输出 "no stdin data" 警告
+ * 2. 可靠的 Windows 超时 — execFile 发 SIGTERM 对 Windows 原生进程无效
  */
 export function runClaudePrint(
   prompt: string,
@@ -27,41 +37,109 @@ export function runClaudePrint(
       args.push("--resume", opts.sessionId);
     }
 
-    execFile(
-      opts.claudePath,
-      args,
-      {
-        cwd: opts.projectDir,
-        timeout: opts.timeoutMs ?? 300_000,
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const detail = stderr?.trim() || error.message;
-          reject(new Error(detail));
-          return;
+    const child = spawn(opts.claudePath, args, {
+      cwd: opts.projectDir,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+    // ── 进度心跳：每 30 秒触发一次，进程退出后自动停止 ──
+    const HEARTBEAT_MS = 30_000;
+    const startTime = Date.now();
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    if (opts.onProgress && child.pid) {
+      heartbeatTimer = setInterval(() => {
+        if (opts.onProgress) {
+          opts.onProgress(Date.now() - startTime, child.pid!);
         }
-        const output = stdout.trim() || stderr?.trim() || "";
-        resolve(output);
-      },
-    );
+      }, HEARTBEAT_MS);
+    }
+
+    const timeoutMs = opts.timeoutMs ?? 900_000;
+    const timer = setTimeout(() => {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      // Windows: SIGTERM 无效，用 taskkill 强制终止进程树
+      if (process.platform === "win32") {
+        const { exec } = require("child_process") as typeof import("child_process");
+        exec(`taskkill /PID ${child.pid} /T /F`, () => {});
+      } else {
+        child.kill("SIGTERM");
+      }
+      reject(new Error(`Claude Code 执行超时 (${timeoutMs / 1000}s)`));
+    }, timeoutMs);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
+
+      // stderr 上的非致命警告（Claude Code 启动阶段信息输出）
+      const stderrClean = stderr.replace(/\x1b\[[0-9;]*m/g, "");
+      const isStderrOnlyWarning =
+        !stderrClean ||
+        stderrClean.includes("no stdin data") ||
+        stderrClean.split("\n").every((l) => l.startsWith("Warning:") || l.startsWith("[") || !l.trim());
+
+      if (code === 0 || (stdout && isStderrOnlyWarning)) {
+        resolve(stdout || stderr || "命令已执行。");
+      } else {
+        reject(new Error(stderr || stdout || `进程退出码: ${code}`));
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      reject(err);
+    });
   });
+}
+
+// ── 就绪检测辅助 ──
+
+/**
+ * 检查 PTY 输出中是否出现了 Claude Code 的就绪提示符。
+ * Claude Code 就绪时会显示 `> ` 或 `⏺` 提示符。
+ */
+function hasReadyPrompt(output: string): boolean {
+  // 最后一行以 > 或 ⏺ 开头
+  if (/>\s*$/m.test(output)) return true;
+  if (/⏺\s*$/m.test(output)) return true;
+  // 独立的 > 行（常见于 TUI 消失后的纯文本模式）
+  const lines = output.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    if (trimmed === ">" || trimmed === "⏺") return true;
+    if (/^[>⏺]\s/.test(trimmed)) return true;
+    break; // 只检查最后一段非空行
+  }
+  return false;
 }
 
 /**
  * 使用伪终端（node-pty）运行 Claude Code 交互模式。
- * 支持 / 命令（/compact、/clear 等）。
  *
  * 为什么用 node-pty：
- * Claude Code 的斜杠命令（/compact、/clear 等）只在交互式 TTY 中生效。
- * 普通 pipe stdin 不被识别为交互终端，命令会被忽略。
- * node-pty 创建伪终端，Claude Code 认为自己在真实终端中运行，正确处理 / 命令。
+ * 1. Claude Code 的 PermissionRequest hook 只在交互式 TTY 中触发
+ * 2. -p 模式（runClaudePrint）不触发 hook，权限请求无法推到飞书
  *
- * 关键时序：
- * 1. pty.spawn claude --resume <uuid>
- * 2. 立即写入命令（伪终端缓冲，初始化完成后处理）
- * 3. 等待响应完成（输出停止 20 秒）
- * 4. kill PTY 进程，提取响应
+ * 关键配置：
+ * - useConpty: false — 用老式 winpty，避免 ConPTY 撕裂 ANSI 序列
+ * - NO_COLOR=1 — 告知 Claude Code 不输出 ANSI 颜色码
+ * - TERM=dumb — 告知程序不要使用高级终端特性
+ *
+ * 智能输入时序：
+ * 1. 积累 Claude Code 启动输出
+ * 2. 检测到欢迎界面（新会话）→ 发送 Enter 选择默认主题
+ * 3. 检测到就绪提示符 → 立即发送用户输入
+ * 4. 超时回退：最多等 MAX_INIT_WAIT_MS（15 秒）
  */
 export function runClaudeInteractive(
   input: string,
@@ -79,8 +157,12 @@ export function runClaudeInteractive(
         cwd: opts.projectDir,
         cols: 120,
         rows: 40,
-        useConpty: true, // Windows 10+ ConPTY
-        env: { ...process.env } as Record<string, string>,
+        useConpty: false, // 用老式 winpty，避免 ANSI 撕裂
+        env: {
+          ...(process.env as Record<string, string>),
+          NO_COLOR: "1",
+          TERM: "dumb",
+        },
       });
     } catch (err) {
       reject(err instanceof Error ? err : new Error(String(err)));
@@ -89,20 +171,99 @@ export function runClaudeInteractive(
 
     const outputChunks: string[] = [];
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    const IDLE_TIMEOUT_MS = 20_000; // 20 秒无输出 = 响应完成
+    const IDLE_TIMEOUT_MS = 20_000;
     let killedByUs = false;
 
-    // 立即写入命令 — PTY 会缓冲并在 Claude Code 初始化完成后处理
-    ptyProc.write(input + "\n");
-    resetIdleTimer();
+    // ── 输入时序 ──
+    // --resume：固定 5 秒延迟（确保会话加载完成），期间检测欢迎界面做快速失败
+    // 新会话：检测欢迎界面 → Enter 跳过 → 检测提示符 → 发输入
+    let userInputSent = false;
+    let enterSent = false;
+    const INIT_DELAY_MS = opts.sessionId ? 5000 : 1500;
+    const MAX_INIT_WAIT_MS = 15_000;
+    let initTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // PTY 合并了 stdout/stderr，统一通过 onData 回调
-    ptyProc.onData((data: string) => {
-      outputChunks.push(data);
+    function sendUserInput(): void {
+      if (userInputSent) return;
+      userInputSent = true;
+      if (initTimer) clearTimeout(initTimer);
+      console.log(`[PTY] sendUserInput: 发送用户输入 (outputChunks 当前长度=${outputChunks.join("").length})`);
+      ptyProc.write(input + "\n");
       resetIdleTimer();
-    });
+    }
 
-    // 总超时处理
+    if (opts.sessionId) {
+      // ── --resume 路径：固定延迟，简单可靠 ──
+      // 不在 onData 中做 isFreshStart 检查——PTY 启动阶段 TUI 初始化输出
+      // 可能偶然命中模式（如 "Press Enter to confirm"），造成误杀。
+      // 改为在 5 秒定时器触发时积累足够数据后再做一次检查。
+      ptyProc.onData((data: string) => {
+        if (!userInputSent) {
+          outputChunks.push(data);
+        } else {
+          outputChunks.push(data);
+          resetIdleTimer();
+        }
+      });
+
+      setTimeout(() => {
+        if (!userInputSent) {
+          const accumulated = outputChunks.join("");
+          if (isFreshStart(accumulated)) {
+            // 5 秒后仍检测到欢迎界面 → 会话真的无效
+            console.log(
+              `[PTY] --resume 检测到欢迎界面（${accumulated.length} 字节），会话可能无效`,
+            );
+            killedByUs = true;
+            try { ptyProc.kill(); } catch { /* 忽略 */ }
+            return;
+          }
+          sendUserInput();
+        }
+      }, INIT_DELAY_MS);
+    } else {
+      // ── 新会话路径：欢迎界面 → Enter 跳过 → 固定延迟发输入 ──
+      // 不依赖 hasReadyPrompt（提示符格式多变，容易误判/漏判），
+      // 仿照 --resume 路径用固定延迟，简单可靠。
+      console.log("[PTY] 新会话路径，等待 Claude Code 初始化...");
+      const ENTER_DELAY_MS = 4000; // Enter 后等 4 秒再发用户输入
+
+      ptyProc.onData((data: string) => {
+        if (!userInputSent) {
+          outputChunks.push(data);
+          console.log(`[PTY] onData(init): +${data.length}字节, 总计=${outputChunks.join("").length}字节, enterSent=${enterSent}`);
+
+          // 检测欢迎界面 → 发 Enter 选择默认主题
+          if (!enterSent && isFreshStart(outputChunks.join(""))) {
+            enterSent = true;
+            console.log("[PTY] 检测到欢迎界面，发送 Enter 选择默认主题");
+            ptyProc.write("\n");
+            outputChunks.length = 0; // 清空欢迎界面，避免混入最终输出
+
+            // Enter 后等固定时间发用户输入（不依赖提示符检测）
+            if (initTimer) clearTimeout(initTimer);
+            initTimer = setTimeout(() => {
+              if (!userInputSent) {
+                console.log("[PTY] Enter 后 %ds 延迟到期，发送用户输入", ENTER_DELAY_MS / 1000);
+                sendUserInput();
+              }
+            }, ENTER_DELAY_MS);
+          }
+        } else {
+          outputChunks.push(data);
+          resetIdleTimer();
+        }
+      });
+
+      // 超时回退：如果欢迎界面一直没出现，也强制发输入
+      initTimer = setTimeout(() => {
+        if (!userInputSent) {
+          console.log("[PTY] initTimer 触发，强制发送用户输入");
+          sendUserInput();
+        }
+      }, MAX_INIT_WAIT_MS);
+    }
+
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Claude Code 交互模式超时"));
@@ -113,24 +274,18 @@ export function runClaudeInteractive(
       if (idleTimer) clearTimeout(idleTimer);
 
       const output = outputChunks.join("").trim();
+      console.log(`[PTY] onExit: exitCode=${exitCode}, outputLen=${output.length}, killedByUs=${killedByUs}, userInputSent=${userInputSent}`);
 
-      // 检测 session 恢复失败：Claude Code 启动了全新实例
-      // （显示 Welcome / 主题选择界面 = --resume 没找到或无法访问会话文件）
+      // --resume 失败（session 过期/不存在），Claude 显示 Welcome 界面。
+      // 抛出包含 "resume" 的错误，callClaudeWithSession 会捕获并回退到 -p 模式重建会话。
       if (opts.sessionId && isFreshStart(output)) {
-        reject(
-          new Error(
-            `无法恢复会话 ${opts.sessionId.slice(0, 8)}...。` +
-              "可能原因：\n" +
-              "1. 该会话正在被另一个 Claude Code 进程使用（如 VSCode）\n" +
-              "2. 会话文件已被删除或损坏\n" +
-              "3. 会话不属于当前项目\n\n" +
-              "💡 可以尝试「新对话」创建新会话，或用「列出对话」查看可用会话。",
-          ),
-        );
+        reject(new Error(
+          `Session resume failed: 无法恢复会话 ${opts.sessionId.slice(0, 8)}...` +
+          `（会话可能已过期或不存在，将自动创建新会话）`,
+        ));
         return;
       }
 
-      // killedByUs: 空闲超时后主动 kill，属于正常结束
       if (killedByUs || exitCode === 0 || output) {
         const cleaned = extractResponse(output);
         resolve(cleaned || "命令已执行。");
@@ -142,48 +297,26 @@ export function runClaudeInteractive(
     function resetIdleTimer(): void {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
-        // 输出停止 → 认为命令已执行完毕，主动结束进程
         killedByUs = true;
-        try {
-          ptyProc.kill();
-        } catch {
-          /* 忽略 */
-        }
+        try { ptyProc.kill(); } catch { /* 忽略 */ }
       }, IDLE_TIMEOUT_MS);
     }
 
     function cleanup(): void {
       clearTimeout(timer);
       if (idleTimer) clearTimeout(idleTimer);
-      try {
-        ptyProc.kill();
-      } catch {
-        /* 忽略 */
-      }
+      try { ptyProc.kill(); } catch { /* 忽略 */ }
     }
   });
 }
 
 /**
  * 检测 Claude Code 输出是否显示「首次启动」界面。
- *
- * 触发条件：
- * - --resume 指定的会话文件不存在 / 被锁定 / 无法访问
- * - Claude Code 回退到创建全新会话，显示欢迎界面和主题选择
- *
- * 检测特征：
- * - "Welcome to Claude Code" 文本
- * - 主题选择菜单（"Auto (match terminal)"、"Dark mode"等）
- * - 版本号横幅
  */
 function isFreshStart(raw: string): boolean {
-  // 去除 ANSI 序列后检测
-  // eslint-disable-next-line no-control-regex
   const stripped = raw.replace(/\x1b\[[?>!$"'()*+ ]?[0-9;]*[a-zA-Z]/g, "");
-  // eslint-disable-next-line no-control-regex
   const clean = stripped.replace(/\x1b\].*?(\x07|\x1b\\)/g, "");
 
-  // Welcome 界面关键词
   const freshPatterns = [
     /Welcome\s*(to\s*)?Claude\s*Code\s*v/i,
     /Let['']s\s*get\s*started/i,
@@ -191,86 +324,81 @@ function isFreshStart(raw: string): boolean {
     /Auto\s*\(\s*match\s*terminal\s*\)/i,
     /Dark\s*mode\s*\(/i,
     /Light\s*mode\s*\(/i,
+    // 新版 Claude Code 主题选择界面（无传统 Welcome 文字）
+    /To change this later, run \/theme/i,
+    /Select (a|your) (theme|style|text style)/i,
+    /Use (arrow keys|↑|↓|↑|↓).*select/i,
+    /Press Enter to confirm/i,
   ];
 
-  const matchCount = freshPatterns.filter((p) => p.test(clean)).length;
-  // 至少命中 2 个特征才判定为 fresh start（减少误判）
-  return matchCount >= 2;
+  const matched = freshPatterns.filter((p) => p.test(clean));
+  // 新版界面可能命中 1-2 个模式（主题选择器 + 提示文字）
+  // "To change this later, run /theme" 仅出现在首启界面
+  // 阈值 >= 2：PTY 启动阶段 TUI 初始化输出可能偶然命中单个模式（如 "Press Enter to confirm"），
+  // 需要至少 2 个模式同时命中才认为是真正的欢迎界面。
+  if (matched.length >= 2) {
+    console.log(
+      `[isFreshStart] ✅ 检测到欢迎界面（命中 ${matched.length} 个模式）: ` +
+      matched.map((r) => r.source.slice(0, 60)).join(" | "),
+    );
+    return true;
+  }
+  if (matched.length === 1) {
+    console.log(
+      `[isFreshStart] ⚠️ 仅命中 1 个模式（忽略，疑似 PTY 初始化误判）: ` +
+      `${matched[0].source.slice(0, 80)}`,
+    );
+  }
+  return false;
 }
 
 /**
  * 从 Claude Code 交互输出中提取实际响应内容。
- * 过滤掉 TUI 框架、提示符、思考指示器等。
- *
- * 处理顺序很关键：
- * 1. 先匹配完整的 ANSI 序列（ESC + 参数 + 终结符）
- * 2. 再去除孤儿 CSI 片段（ESC 已被上一步部分消费或跨 chunk 丢失的残留）
- * 3. 最后清理 TUI 字符和提示符
+ * 清理 ANSI 序列、TUI 装饰字符、提示符等。
  */
 function extractResponse(raw: string): string {
   let text = raw;
 
-  // ── 第一轮：完整的 ANSI 转义序列 ──
+  // ── 1. ANSI/CSI 序列 ──
 
   // CSI 序列：ESC [ ... 终结符
-  // 支持：
-  //   - 标准 CSI：ESC [ 数字;数字 m/h/l
-  //   - DEC 私有模式：ESC [ ? 数字;数字 h/l/r/s
-  //   - 其他前缀：> ! $ " ' ( ) * +
   // eslint-disable-next-line no-control-regex
   text = text.replace(/\x1b\[[?>!$"'()*+ ]?[0-9;]*[a-zA-Z]/g, "");
-
-  // 其他 ESC 序列（非 CSI 的 Fe 序列、Fs 序列等）
+  // OSC 序列：ESC ] ... (BEL 或 ST)
+  // eslint-disable-next-line no-control-regex
+  text = text.replace(/\x1b\].*?(\x07|\x1b\\)/g, "");
+  // 单字符 ESC 序列
   // eslint-disable-next-line no-control-regex
   text = text.replace(/\x1b[NOPQRSWXYZ=>[\]^_\\`bcdhikmnpqrstuvwxyz{|}~]/g, "");
 
-  // OSC 序列：ESC ] ... BEL 或 ESC ] ... ESC \
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/\x1b\].*?(\x07|\x1b\\)/g, "");
-
-  // DCS、SOS、PM、APC 等
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/\x1b[PX^_].*?(\x1b\\|\x07)/g, "");
-
-  // ── 第二轮：孤儿 CSI 片段（ESC 已丢失，残留的 [? / [> 等参数部分）──
-  // 这些是跨 chunk 传输或 ConPTY 转换时 ESC 被分离后剩下的
-  // 匹配行首或字间隙处的 [ ?/> 开头 + 数字分号 + 终结字母
+  // 孤儿 CSI 片段（DEC 私有模式等，[?>] 前缀必须存在）
   // eslint-disable-next-line no-control-regex
   text = text.replace(/(?:^|\s|(?<!\w))\[[?>][0-9;]*[a-zA-Z]/gm, "");
-
-  // 孤儿 SGR 片段：孤立的 [...m 模式
+  // 孤儿 SGR 片段：孤立的 [...m（ESC 丢失后残留的颜色码）
   // eslint-disable-next-line no-control-regex
   text = text.replace(/(?:^|\s|(?<!\w))\[[0-9;]*m/gm, "");
 
-  // ── 第三轮：剩余控制字符（保留 \t \n \r）──
-  // 注意：ESC 本身是 \x1b，在第一轮没匹配到的就属于孤儿，此处清除
+  // 控制字符（保留 \t \n \r）
   // eslint-disable-next-line no-control-regex
   text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 
-  // ── 第四轮：TUI 装饰字符 ──
-
-  // 框线字符（U+2500–U+257F）
+  // ── 2. 框线字符和块元素 ──
   // eslint-disable-next-line no-control-regex
-  text = text.replace(/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰╱╲╳╴╵╶╷╸╹╺╻╼╽╾╿]/g, "");
+  text = text.replace(/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰╱╲╳╴╵╶╷╸╹╺╻╼╽╾╿▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟]/g, "");
 
-  // 块元素和着色字符（U+2580–U+259F：▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟）
-  // eslint-disable-next-line no-control-regex
-  text = text.replace(/[▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟]/g, "");
+  // ── 3. TUI 提示符和状态指示 ──
 
-  // ── 第五轮：提示符行和 TUI 状态指示 ──
-
-  // 去除只有提示符的行
+  // 独立的提示符行
   text = text.replace(/^[>⏺●]\s*$/gm, "");
-  text = text.replace(/\n[>⏺●]\s*$/gm, "");
 
-  // 去除 TUI 标签和状态指示
+  // TUI 状态指示
   text = text.replace(/⏺\s*思考中[.\s]*/g, "");
   text = text.replace(/⏺\s*处理中[.\s]*/g, "");
   text = text.replace(/⏺\s*正在[^\n]*/g, "");
 
-  // ── 第六轮：Claude Code TUI 框架文本 ──
+  // ── 4. Welcome / 主题选择界面残留 ──
 
-  // Welcome / 主题选择界面残留文本
+  // 传统 Welcome
   text = text.replace(/Welcome\s*to\s*Claude\s*Code\s*v[\d.]+\s*/gi, "");
   text = text.replace(/Let['']s\s*get\s*started[.\s]*/gi, "");
   text = text.replace(/Choose\s*the\s*text\s*style[^\n]*/gi, "");
@@ -279,22 +407,47 @@ function extractResponse(raw: string): string {
   text = text.replace(/Light\s*mode\s*(?:\([^)]*\))?\s*/gi, "");
   text = text.replace(/Syntax\s*theme:\s*[^\n]*/gi, "");
 
-  // 过多的连续点号（ASCII art 残留）
+  // 新版 Claude Code 主题选择界面
+  text = text.replace(/To change this later, run \/theme[^\n]*/gi, "");
+  text = text.replace(/Select (a|your) (theme|style|text style)[^\n]*/gi, "");
+  text = text.replace(/Use (arrow keys|↑|↓|↑|↓).*select[^\n]*/gi, "");
+  text = text.replace(/Press Enter to confirm[^\n]*/gi, "");
+
+  // 主题选择器 TUI 行：
+  // - 带勾选标记的编号行（如 "> 1.  √"）
+  // - 带光标 > 的选项行（如 "> 1. Dark mode"）
+  text = text.replace(/^[>\s]*[\d]+\s*[✓√✔].*$/gm, "");
+  // 主题选项关键词匹配：只移除明确包含主题相关词汇的行，且必须有编号前缀
+  text = text.replace(/^[>\s]*\d+[\.\s]+.*(Dark mode|Light mode|Colorblind|match terminal|text style|syntax theme).*$/gim, "");
+  // 空编号列表残留（如单独一行的 "  2.  3.  4. ..."）
+  text = text.replace(/^(?:\s*\d+\s*\.?\s*)+(?:\d+\s*\.?\s*)$/gm, "");
+
+  // ── 5. 项目符号（先移除含项目符号的整行，再移除残留字符）──
+  // 重要：必须先做行级清理（此时项目符号还在），再做字符级清理
+  // eslint-disable-next-line no-control-regex
+  text = text.replace(/^\s*[•◦▪▸▹◾▫◽⬤⚬⚫●]\s*$/gm, "");
+  // 行首带项目符号的前导空白行
+  // eslint-disable-next-line no-control-regex
+  text = text.replace(/^[•◦▪▸▹●]\s*/gm, "");
+  // 残留的项目符号字符
+  // eslint-disable-next-line no-control-regex
+  text = text.replace(/[•◦▪▸▹◾▫◽⬤⚬⚫●]/g, "");
+
+  // ── 6. TUI 间距填充 ──
+  // 连续点号（TUI 菜单间距填充，如 "......."）
   text = text.replace(/\.{10,}/g, "");
 
-  // 去除可能残留的编号选项（1. 2. 3. ... 7. 后跟选项文本的）
-  text = text.replace(/[1-7]\.[A-Z][a-z]+(?:\([^)]*\))?\s*/g, "");
-
-  // 去除末尾命令行提示和空白
-  text = text.replace(/\n\s*[>⏺●]\s*$/, "");
-
-  // ── 最终清理 ──
-
-  // 去除多余空白行（3 个以上连续换行 → 2 个）
+  // ── 7. 最终清理 ──
   text = text.replace(/\n{3,}/g, "\n\n");
-
-  // 去除行首行尾空白
   text = text.trim();
+
+  // 诊断：清理后为空时记录（包括 raw 全空白的情况）
+  if (!text) {
+    console.log(
+      `[extractResponse] ⚠️ 清理后为空！原始长度=${raw.length}, rawIsEmpty=${!raw.trim()}, ` +
+      `原始前200字符=${JSON.stringify(raw.slice(0, 200))}`,
+    );
+  }
 
   return text;
 }

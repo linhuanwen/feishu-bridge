@@ -1,0 +1,9 @@
+# 钉钉群机器人配置
+# 获取 Webhook URL：钉钉群 → 群设置 → 智能群助手 → 添加自定义机器人 → Webhook 地址
+
+webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=your_token"
+secret: "your_secret"
+enabled: true
+rate_limit_per_minute: 20
+retry_times: 3
+retry_seconds: 5.0

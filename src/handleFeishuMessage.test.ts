@@ -5,7 +5,7 @@ import type { FeishuMessageEvent } from "./types.js";
 describe("handleFeishuMessage", () => {
   it("收到用户文本消息时，向对应 chat_id 发送连接确认回复", async () => {
     process.env.TZ = "Asia/Shanghai";
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const now = () => new Date("2026-06-15T16:49:41.913+08:00");
 
     const event: FeishuMessageEvent = {
@@ -22,7 +22,7 @@ describe("handleFeishuMessage", () => {
       },
     };
 
-    await handleFeishuMessage(event, { sendReply, now });
+    await handleFeishuMessage(event, { sendReply, now, logger: () => {} });
 
     expect(sendReply).toHaveBeenCalledTimes(1);
     expect(sendReply).toHaveBeenCalledWith(
@@ -32,7 +32,7 @@ describe("handleFeishuMessage", () => {
   });
 
   it("忽略 Bot 自己发送的消息，避免循环回复", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const now = () => new Date();
 
     const event: FeishuMessageEvent = {
@@ -49,7 +49,7 @@ describe("handleFeishuMessage", () => {
       },
     };
 
-    await handleFeishuMessage(event, { sendReply, now });
+    await handleFeishuMessage(event, { sendReply, now, logger: () => {} });
 
     expect(sendReply).not.toHaveBeenCalled();
   });

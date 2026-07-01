@@ -134,6 +134,7 @@ describe("createPermissionGate — guard 确认流程", () => {
       "oc_123",
       "⚠️ 高危操作确认",
       "即将执行 delete：d:\\temp",
+      undefined,
     );
     expect(sender.waitForButtonClick).toHaveBeenCalledWith("msg_card_001", 60_000);
     expect(execute).toHaveBeenCalledTimes(1);

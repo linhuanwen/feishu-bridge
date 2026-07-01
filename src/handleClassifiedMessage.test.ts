@@ -5,7 +5,7 @@ import type { IntentLabel } from "./classifyIntent.js";
 
 describe("handleClassifiedMessage", () => {
   it("对用户消息调用分类器并发送分类结果", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
 
     const event: FeishuMessageEvent = {
@@ -25,11 +25,11 @@ describe("handleClassifiedMessage", () => {
     await handleClassifiedMessage(event, { sendReply, classifyIntent });
 
     expect(classifyIntent).toHaveBeenCalledWith("看看 D 盘");
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：simple");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：simple", expect.any(String));
   });
 
   it("非文本消息（空内容）不调用分类器，直接提示用户", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
 
     // 图片、文件、表情等消息没有 text 字段
@@ -50,11 +50,11 @@ describe("handleClassifiedMessage", () => {
     await handleClassifiedMessage(event, { sendReply, classifyIntent });
 
     expect(classifyIntent).not.toHaveBeenCalled();
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "暂不支持该消息类型，请发送文字指令。");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "暂不支持该消息类型，请发送文字指令。", expect.any(String));
   });
 
   it("忽略 Bot 自身消息", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
 
     const event: FeishuMessageEvent = {
@@ -78,7 +78,7 @@ describe("handleClassifiedMessage", () => {
   });
 
   it("分类为 simple 但用户不在白名单时，回复 open_id 并拒绝", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(false);
 
@@ -103,11 +103,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_eve"),
+  expect.any(String),
     );
   });
 
   it("分类为 simple + 白名单通过 + 指令匹配时，执行并返回结果", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeSimpleCommand = vi.fn().mockResolvedValue({
@@ -138,13 +139,13 @@ describe("handleClassifiedMessage", () => {
 
     expect(isSenderAllowed).toHaveBeenCalledWith("ou_alice");
     expect(executeSimpleCommand).toHaveBeenCalledWith("ls D:\\");
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "📂 D:\\（2 项）\na.txt  100 B  2026-01-01");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "📂 D:\\（2 项）\na.txt  100 B  2026-01-01", expect.any(String));
   });
 
   // ---- inquire 路由测试 ----
 
   it("分类为 inquire → 调用 executeInquire 并返回文件摘要", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("inquire" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeInquire = vi.fn().mockResolvedValue({
@@ -177,11 +178,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("买牛奶"),
+  expect.any(String),
     );
   });
 
   it("分类为 inquire + 白名单拒绝 → 回复 open_id 并拒绝", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("inquire" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(false);
     const executeInquire = vi.fn();
@@ -212,11 +214,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_eve"),
+  expect.any(String),
     );
   });
 
   it("分类为 inquire + executeInquire 返回错误 → 向用户发送错误信息", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("inquire" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeInquire = vi.fn().mockResolvedValue({
@@ -248,11 +251,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("超时"),
+  expect.any(String),
     );
   });
 
   it("分类为 simple + 白名单通过 + 无匹配指令时，返回提示", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeSimpleCommand = vi.fn().mockResolvedValue(null);
@@ -280,14 +284,15 @@ describe("handleClassifiedMessage", () => {
 
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
-      expect.stringContaining("未知指令"),
+      expect.stringContaining("分类为"),
+      expect.any(String),
     );
   });
 
   // ---- image 回复路径 ----
 
   it("指令返回 image 类型 → 调用 sendImageReply 发送图片", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const sendImageReply = vi.fn().mockResolvedValue(undefined);
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
@@ -328,7 +333,7 @@ describe("handleClassifiedMessage", () => {
   // ---- task 路由测试 ----
 
   it("分类为 task → 调用 executeTask 并返回结果", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("task" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeTask = vi.fn().mockResolvedValue({
@@ -365,11 +370,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("代码审查完成"),
+  expect.any(String),
     );
   });
 
   it("分类为 task + 白名单拒绝 → 回复 open_id 并拒绝", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("task" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(false);
     const executeTask = vi.fn();
@@ -400,11 +406,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("ou_eve"),
+  expect.any(String),
     );
   });
 
   it("分类为 task + executeTask 返回错误 → 向用户发送错误信息", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("task" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeTask = vi.fn().mockResolvedValue({
@@ -436,11 +443,12 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("无法确定项目目录"),
+  expect.any(String),
     );
   });
 
   it("未配置 executeTask 时 task 分类向后兼容（回复分类标签）", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("task" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
 
@@ -465,11 +473,11 @@ describe("handleClassifiedMessage", () => {
       // 不传 executeTask
     });
 
-    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task");
+    expect(sendReply).toHaveBeenCalledWith("oc_456", "分类为：task", expect.any(String));
   });
 
   it("指令返回 image 但没有 sendImageReply → 回退为文字提示", async () => {
-    const sendReply = vi.fn().mockResolvedValue(undefined);
+    const sendReply = vi.fn().mockResolvedValue("msg_001");
     const classifyIntent = vi.fn().mockResolvedValue("simple" as IntentLabel);
     const isSenderAllowed = vi.fn().mockReturnValue(true);
     const executeSimpleCommand = vi.fn().mockResolvedValue({
@@ -502,6 +510,7 @@ describe("handleClassifiedMessage", () => {
     expect(sendReply).toHaveBeenCalledWith(
       "oc_456",
       expect.stringContaining("截图功能未配置"),
+  expect.any(String),
     );
   });
 });

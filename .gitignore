@@ -1,5 +1,8 @@
 # Secrets
 .env
+biaoge/config/feishu.yaml
+biaoge/config/llm.yaml
+biaoge/config/dingtalk.yaml
 
 # Dependencies
 node_modules/

@@ -1,12 +1,9 @@
 import { buildPingPongReply } from "./buildPingPongReply.js";
-import type { FeishuMessageEvent } from "./types.js";
+import type { FeishuMessageEvent, MessageHandlerContext } from "./types.js";
 
 export type { FeishuMessageEvent };
 
-export type FeishuMessageHandlerDeps = {
-  sendReply: (chatId: string, text: string) => Promise<void>;
-  now: () => Date;
-};
+export type FeishuMessageHandlerDeps = MessageHandlerContext;
 
 export async function handleFeishuMessage(
   event: FeishuMessageEvent,

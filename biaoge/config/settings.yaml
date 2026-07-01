@@ -1,0 +1,7 @@
+# 全局设置
+# 环境变量覆盖：SWI_ 前缀，如 SWI_LOG_LEVEL=DEBUG
+
+log_level: INFO
+scheduler_timezone: Asia/Shanghai
+dashboard_host: 127.0.0.1
+dashboard_port: 8080

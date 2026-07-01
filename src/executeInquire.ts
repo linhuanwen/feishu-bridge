@@ -8,12 +8,14 @@ export type InquireResult =
   | { ok: false; error: string };
 
 function buildInquirePrompt(userMessage: string): string {
-  return `用户请求读取文件内容。请读取并总结以下用户消息中指定的文件。如果文件不存在或无法读取，请明确说明。如果文件格式不支持，也请说明。
+  return `用户向你发送了以下消息，请直接回答或处理：
 
 用户消息：
 \`\`\`
 ${userMessage}
-\`\`\``;
+\`\`\`
+
+请根据消息内容执行相应的操作或回答。如果涉及文件操作，请先读取相关文件。如果文件不存在或无法操作，请明确说明原因。`;
 }
 
 function isTimeoutError(err: Error): boolean {

@@ -1,8 +1,13 @@
 import { classifyIntent, type IntentLabel } from "./classifyIntent.js";
-import { createOllamaClassifier } from "./createOllamaClassifier.js";
+import { createDeepSeekClassifier } from "./createDeepSeekClassifier.js";
 
-const MODEL = "qwen2.5:7b";
-const BASE_URL = "http://127.0.0.1:11434";
+const MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-chat";
+const BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+const API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
+if (!API_KEY) {
+  console.error("请设置 DEEPSEEK_API_KEY 环境变量");
+  process.exit(1);
+}
 
 const TEST_CASES: Array<{ message: string; expected: IntentLabel }> = [
   // simple: 本地直接执行的操作（35 条）
@@ -115,13 +120,13 @@ const TEST_CASES: Array<{ message: string; expected: IntentLabel }> = [
 async function main() {
   console.log(`开始评估 ${MODEL}，共 ${TEST_CASES.length} 条用例...`);
 
-  const callOllama = createOllamaClassifier({ baseUrl: BASE_URL, model: MODEL });
+  const callAI = createDeepSeekClassifier({ apiKey: API_KEY, baseUrl: BASE_URL, model: MODEL });
   const results: Array<{ message: string; expected: IntentLabel; actual: IntentLabel; ok: boolean }> = [];
 
   for (let i = 0; i < TEST_CASES.length; i++) {
     const { message, expected } = TEST_CASES[i];
     process.stdout.write(`[${i + 1}/${TEST_CASES.length}] ${message.slice(0, 30)}... `);
-    const actual = await classifyIntent(message, { callOllama });
+    const actual = await classifyIntent(message, { callAI });
     const ok = actual === expected;
     results.push({ message, expected, actual, ok });
     console.log(`${actual} ${ok ? "✓" : "✗"}`);

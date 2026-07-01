@@ -6,12 +6,19 @@ import {
 } from "./discoverClaudeSessions.js";
 
 export type ExecuteTaskDeps = {
-  /** 调用 Claude Code CLI（-p 模式），传入 prompt 和选项 */
+  /** 调用 Claude Code CLI（PTY 交互模式，支持 forcePrint 回退到 -p） */
   callClaude: (
     prompt: string,
-    opts: { projectDir: string; sessionId?: string; timeoutMs: number },
+    opts: {
+      projectDir: string;
+      sessionId?: string;
+      timeoutMs: number;
+      forcePrint?: boolean;
+      /** 进度心跳回调（子进程存活时每 30s 触发一次） */
+      onProgress?: (elapsedMs: number, pid: number) => void;
+    },
   ) => Promise<string>;
-  /** 调用 Claude Code CLI（交互/stdin 管道模式，支持 / 命令） */
+  /** 调用 Claude Code CLI（PTY 交互模式，支持 PermissionRequest hook） */
   callClaudeInteractive?: (
     input: string,
     opts: { projectDir: string; sessionId?: string; timeoutMs: number },
@@ -22,6 +29,19 @@ export type ExecuteTaskDeps = {
   now: () => Date;
   /** 任务执行超时（毫秒），默认 300_000（5 分钟） */
   taskTimeoutMs?: number;
+  /**
+   * 可选：任务进度回调。子进程存活期间每 30s 触发一次，
+   * 用于向飞书发送「任务仍在进行中」的进度提醒。
+   * 进程退出（正常/异常/超时）后不再触发。
+   */
+  onTaskProgress?: (elapsedMs: number, pid: number) => void;
+  /**
+   * 可选：向飞书 chat 发送进度消息。
+   * 在子进程存活期间每隔 30s 调用一次；进程退出后不再调用。
+   */
+  sendProgress?: (chatId: string, message: string) => Promise<void>;
+  /** 默认项目目录（当消息中无法提取路径且无活跃会话时使用） */
+  defaultProjectDir?: string;
   /**
    * 可选：确保目标项目的 .claude/settings.json 包含权限桥 hook 配置。
    */
@@ -39,6 +59,13 @@ export type TaskResult =
 
 // ── 元命令检测 ──
 
+/** 去除飞书消息中的 @mention 标记 */
+function stripFeishuMentions(text: string): string {
+  let cleaned = text.replace(/<at\b[^>]*>.*?<\/at>/gi, "");
+  cleaned = cleaned.replace(/@_user_\w+/g, "");
+  return cleaned.trim();
+}
+
 const SWITCH_PROJECT_RE = /^切换(?:项目|目录|到)\s+(.+)/i;
 
 const CURRENT_PROJECT_RE =
@@ -46,7 +73,7 @@ const CURRENT_PROJECT_RE =
 
 /** 「列出对话」/「对话列表」（可选项目筛选） */
 const LIST_SESSIONS_RE =
-  /^(?:列出)?对话(?:列表|列别)?$|^有哪些对话/i;
+  /^(?:(?:列出)?对话(?:列表|列别)?|有哪些对话)$/i;
 
 /** 「列出对话 <项目关键词或路径>」 */
 const LIST_SESSIONS_FILTER_RE =
@@ -55,11 +82,14 @@ const LIST_SESSIONS_FILTER_RE =
 /** 「进入对话 <id 或序号或关键词>」（空格可选） */
 const ENTER_SESSION_RE = /^进入对话\s*(.+)/i;
 
-/** 「新对话」 */
-const NEW_SESSION_RE = /^新对话/i;
+/** 「新对话」/「新会话」 */
+const NEW_SESSION_RE = /^新(对话|会话)/i;
 
 /** 「当前对话」 — 查看当前活跃会话信息 */
 const CURRENT_SESSION_RE = /^当前对话/i;
+
+/** 「退出」/「退出会话」/「退出对话」 — 退出当前对话，回到无会话状态 */
+const EXIT_SESSION_RE = /^退出(会话|对话)?$/i;
 
 /** 以 / 开头的 Claude Code 内置命令 */
 const SLASH_COMMAND_RE = /^\/(\w+)/;
@@ -81,8 +111,9 @@ const WIN_PATH_RE = /([a-zA-Z]:\\[^\s]*)/g;
  * 4. 元命令：「进入对话 <id>」— 切换到指定会话
  * 5. 元命令：「新对话」— 在当前项目创建新会话
  * 6. 元命令：「当前对话」— 查看当前会话信息
- * 7. / 命令 — 通过交互模式转发到 Claude Code
- * 8. 普通任务消息 — 创建/续接 Claude Code 会话
+ * 7. 元命令：「退出会话」— 退出当前对话，回到无会话状态
+ * 8. / 命令 — 通过交互模式转发到 Claude Code
+ * 9. 普通任务消息 — 创建/续接 Claude Code 会话
  */
 export async function executeTask(
   userMessage: string,
@@ -90,24 +121,27 @@ export async function executeTask(
   registry: SessionRegistry,
   deps: ExecuteTaskDeps,
 ): Promise<TaskResult> {
+  // 预处理：去除 @mention 标记，避免 @_user_1 等干扰元命令匹配
+  const cleaned = stripFeishuMentions(userMessage);
+
   // —— 元命令：切换项目 ——
-  const switchMatch = userMessage.match(SWITCH_PROJECT_RE);
+  const switchMatch = cleaned.match(SWITCH_PROJECT_RE);
   if (switchMatch) {
     return handleSwitchProject(switchMatch[1].trim(), chatId, registry, deps);
   }
 
   // —— 元命令：当前项目 ——
-  if (CURRENT_PROJECT_RE.test(userMessage.trim())) {
+  if (CURRENT_PROJECT_RE.test(cleaned.trim())) {
     return handleCurrentProject(chatId, registry);
   }
 
   // —— 元命令：列出对话（精确）——
-  if (LIST_SESSIONS_RE.test(userMessage.trim())) {
+  if (LIST_SESSIONS_RE.test(cleaned.trim())) {
     return handleListSessions(chatId, registry, deps);
   }
 
   // —— 元命令：列出对话（带项目筛选）——
-  const listFilterMatch = userMessage.match(LIST_SESSIONS_FILTER_RE);
+  const listFilterMatch = cleaned.match(LIST_SESSIONS_FILTER_RE);
   if (listFilterMatch) {
     const filter = listFilterMatch[1].trim();
     // 排除被误识别为筛选词的命令关键词
@@ -117,28 +151,33 @@ export async function executeTask(
   }
 
   // —— 元命令：进入对话 ——
-  const enterMatch = userMessage.match(ENTER_SESSION_RE);
+  const enterMatch = cleaned.match(ENTER_SESSION_RE);
   if (enterMatch) {
     return handleEnterSession(enterMatch[1].trim(), chatId, registry, deps);
   }
 
   // —— 元命令：新对话 ——
-  if (NEW_SESSION_RE.test(userMessage.trim())) {
+  if (NEW_SESSION_RE.test(cleaned.trim())) {
     return handleNewSession(chatId, registry, deps);
   }
 
   // —— 元命令：当前对话 ——
-  if (CURRENT_SESSION_RE.test(userMessage.trim())) {
+  if (CURRENT_SESSION_RE.test(cleaned.trim())) {
     return handleCurrentSession(chatId, registry, deps);
   }
 
+  // —— 元命令：退出会话 ——
+  if (EXIT_SESSION_RE.test(cleaned.trim())) {
+    return handleExitSession(chatId, registry);
+  }
+
   // —— / 命令检测 ——
-  if (SLASH_COMMAND_RE.test(userMessage.trim())) {
-    return handleSlashCommand(userMessage.trim(), chatId, registry, deps);
+  if (SLASH_COMMAND_RE.test(cleaned.trim())) {
+    return handleSlashCommand(cleaned.trim(), chatId, registry, deps);
   }
 
   // —— 普通任务：创建或续接 session ——
-  return handleTaskMessage(userMessage, chatId, registry, deps);
+  return handleTaskMessage(cleaned, chatId, registry, deps);
 }
 
 // ── 内部处理函数 ──
@@ -476,8 +515,42 @@ function handleCurrentSession(
 }
 
 /**
+ * 「退出会话」— 退出当前对话，回到无会话状态。
+ * 之后的消息不再自动 --resume，除非用户再次「进入对话」或「新对话」。
+ */
+function handleExitSession(
+  chatId: string,
+  registry: SessionRegistry,
+): TaskResult {
+  const existing = registry.findByChatId(chatId);
+
+  if (!existing) {
+    return {
+      ok: true,
+      summary:
+        "📭 当前没有活跃对话，无需退出。\n\n" +
+        "💡 输入「列出对话」查看所有可用对话\n" +
+        "💡 输入「进入对话 <序号>」选择一个对话",
+      sessionId: "",
+    };
+  }
+
+  registry.remove(existing.sessionId);
+
+  return {
+    ok: true,
+    summary:
+      `✅ 已退出对话：\`${existing.sessionId.slice(0, 8)}...\`\n` +
+      `📂 项目：\`${existing.projectDir}\`\n\n` +
+      `之前的对话仍保留在磁盘上，可通过「列出对话」找回。\n` +
+      `💡 输入「**新对话**」开始新对话，或直接发送任务消息自动创建。`,
+    sessionId: "",
+  };
+}
+
+/**
  * 执行 / 命令（/compact、/clear 等）。
- * 使用交互模式（无 -p），通过 stdin 管道发送命令。
+ * 优先使用 PTY 交互模式（支持 / 命令 + PermissionRequest hook），回退到 -p 模式。
  */
 async function handleSlashCommand(
   command: string,
@@ -496,7 +569,7 @@ async function handleSlashCommand(
     };
   }
 
-  // 优先用交互模式（支持 / 命令），回退到 -p 模式
+  // 优先用 PTY 交互模式（支持 / 命令 + PermissionRequest hook → 飞书卡片）
   if (deps.callClaudeInteractive) {
     try {
       const output = await deps.callClaudeInteractive(command, {
@@ -529,7 +602,7 @@ async function handleSlashCommand(
     chatId,
     registry,
     deps,
-    false, // 使用 --resume 续接
+    false,
   );
 }
 
@@ -561,6 +634,11 @@ async function handleTaskMessage(
       registry.touch(existing.sessionId, deps.now());
     }
 
+    // 确保项目 settings 包含最新的预授权规则
+    if (deps.ensureClaudeSettings) {
+      deps.ensureClaudeSettings(projectDir).catch(() => {});
+    }
+
     // 已有会话：使用 --resume 续接（如果是真实 UUID）
     return callClaudeWithSession(
       userMessage,
@@ -574,7 +652,7 @@ async function handleTaskMessage(
   }
 
   // —— 没有现有会话 ——
-  const projectDir = extractedDir;
+  const projectDir = extractedDir ?? deps.defaultProjectDir;
   if (!projectDir) {
     return {
       ok: false,
@@ -625,14 +703,29 @@ async function callClaudeWithSession(
   isNew: boolean = false,
 ): Promise<TaskResult> {
   try {
+    // 构建进度回调：子进程存活时每 30s 向飞书发送进度提醒
+    const onProgress = deps.sendProgress
+      ? (elapsedMs: number, pid: number) => {
+          const minutes = Math.floor(elapsedMs / 60_000);
+          const seconds = Math.floor((elapsedMs % 60_000) / 1000);
+          const elapsed = minutes > 0
+            ? `${minutes} 分 ${seconds} 秒`
+            : `${seconds} 秒`;
+          void deps.sendProgress!(chatId,
+            `⏳ 任务仍在处理中…（已运行 ${elapsed}，PID ${pid}）`,
+          );
+        }
+      : deps.onTaskProgress;
+
     const output = await deps.callClaude(prompt, {
       projectDir,
       sessionId: isNew ? undefined : ourSessionId,
-      timeoutMs: deps.taskTimeoutMs ?? 300_000,
+      timeoutMs: deps.taskTimeoutMs ?? 900_000,
+      onProgress,
     });
 
-    // 首次调用后，发现 Claude Code 的真实 UUID 并更新注册表
-    // 这样后续的 --resume 才能正常工作（PTY 模式尤其需要真实 UUID）
+    // 首次调用后，发现 Claude Code 的真实 UUID 并更新注册表。
+    // 只在新建会话时执行；续接成功时 UUID 未变，无需扫描磁盘。
     if (isNew) {
       updateSessionWithRealUuid(projectDir, ourSessionId, chatId, registry);
     }
@@ -645,30 +738,14 @@ async function callClaudeWithSession(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 
-    // 如果 --resume 失败（session ID 无效），尝试创建新会话
+    // 如果 --resume 失败（session ID 无效），告知用户上下文丢失
     if (!isNew && message.includes("resume")) {
-      try {
-        const output = await deps.callClaude(prompt, {
-          projectDir,
-          sessionId: undefined, // 不传 sessionId，创建新会话
-          timeoutMs: deps.taskTimeoutMs ?? 300_000,
-        });
-
-        // 发现真实 UUID 并更新注册表
-        updateSessionWithRealUuid(projectDir, ourSessionId, chatId, registry);
-
-        return {
-          ok: true,
-          summary: output,
-          sessionId: ourSessionId,
-        };
-      } catch (err2) {
-        const msg2 = err2 instanceof Error ? err2.message : String(err2);
-        return {
-          ok: false,
-          error: `任务执行失败：${msg2}`,
-        };
-      }
+      return {
+        ok: false,
+        error:
+          `⚠️ 会话 \`${ourSessionId.slice(0, 8)}...\` 已过期，无法恢复对话上下文。\n\n` +
+          `💡 请输入「**新对话**」开始一个新会话，或「**列出对话**」选择其他对话。`,
+      };
     }
 
     return {

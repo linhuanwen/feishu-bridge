@@ -1,0 +1,32 @@
+# Agent 注册表 — 在这里注册新Agent
+# 每个Agent配置 enabled, schedule, description
+# config 字段会作为 dict 传给 Agent.__init__(config={...})
+
+agents:
+  hello:
+    enabled: true
+    schedule: "*/5 * * * *"
+    description: "框架心跳检测Agent，每5分钟一次"
+
+  ad_monitor:
+    enabled: false
+    schedule: "0 */3 * * *"
+    description: "WB广告数据监控 — 自动检测CTR/花费/订单异常"
+    config:
+      ctr_warning: 0.3
+      ctr_critical: 0.1
+      api_key: "eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjYwMzAydjEiLCJ0eXAiOiJKV1QifQ.eyJhY2MiOjMsImVudCI6MSwiZXhwIjoxNzk4NDcyODI3LCJmb3IiOiJzZWxmIiwiaWQiOiIwMTlmMTE3Yy1lYzIwLTdkN2MtOWUzNC0wZjdiZjlmOWI4MGIiLCJpaWQiOjI1NDE1NjQ3NSwib2lkIjoyNTAwOTAxMzUsInMiOjgxNjYyLCJzaWQiOiJiM2VlYTJlMC1lNGRkLTRhODYtYTU5Ny1lNzMyMDZmNDM0MTMiLCJ0IjpmYWxzZSwidWlkIjoyNTQxNTY0NzV9.Z0nmqqkPzJyAIrLLK16QR5V5pmvkrupr7o_6ayuL1C2WLU_1A4VSt56zcRjVAIT01Dv4deAEmRBKGEzlU7vfNg"
+      data_dir: "data/imports"
+      stores:
+        - 晋兴
+        - 惠扬
+        - 茹云
+
+  table_reporter:
+    enabled: true
+    schedule: "0 9 * * *"
+    description: "每日读取飞书多维表格全量数据，通过 AI 生成分析报告并推送到飞书群「每日报告」"
+    config:
+      base_token: "V2YEb5CMGaD5pPsbjClc7rdLnxY"
+      report_prompt: ""
+      model: "deepseek-chat"

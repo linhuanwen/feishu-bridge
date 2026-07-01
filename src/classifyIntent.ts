@@ -4,15 +4,16 @@ const VALID_LABELS: IntentLabel[] = ["simple", "inquire", "task"];
 const FALLBACK_LABEL: IntentLabel = "task";
 
 export type ClassifyIntentDeps = {
-  callOllama: (prompt: string) => Promise<string>;
+  callAI: (prompt: string) => Promise<string>;
 };
 
 function buildClassifierPrompt(message: string): string {
   return `你是 Feishu Bridge 的意图分类器。把用户消息分到以下三类之一：
-- simple: 目录浏览、系统状态查询、截图、预注册别名指令等本地直接执行的操作
-- inquire: 读取文件内容、摘要文件、搜索文件等需要理解文件格式的操作
-- task: 需要多轮对话的复杂任务，如代码审查、重构、修改文件、执行命令等
+- simple: 系统状态查询、截图、屏幕、打开/关闭程序、ls/目录浏览等本地直接执行的操作
+- inquire: 读取文件内容、摘要文件、搜索代码等需要理解文件路径的操作
+- task: 需要 Claude Code 处理的任务——代码审查、重构、修改文件、执行命令、回答编程问题、聊天问答、项目相关咨询等
 
+重要：聊天对话（如"说一下你是谁""帮我解释一下"）和编程问答应归为 task，不要归为 simple。
 只回复一个单词：simple、inquire 或 task。
 
 用户消息：
@@ -31,7 +32,14 @@ function normalizeLabel(raw: string): IntentLabel | null {
 }
 
 // ── 本地关键词快速预判 ──
-// 不需要调用 Ollama 就能准确判断的指令，直接返回结果。
+// 不需要调用 AI API 就能准确判断的指令，直接返回结果。
+
+/** 去除飞书消息中的 @mention 标记，避免干扰分类匹配 */
+function stripAtMentions(text: string): string {
+  let cleaned = text.replace(/<at\b[^>]*>.*?<\/at>/gi, "");
+  cleaned = cleaned.replace(/@_user_\w+/g, "");
+  return cleaned.trim();
+}
 
 const SIMPLE_PATTERNS: RegExp[] = [
   /^(状态|截图|拍照|屏幕|系统)/,
@@ -44,13 +52,28 @@ const SIMPLE_PATTERNS: RegExp[] = [
 ];
 
 // 会话管理命令 — 直接走 task → executeTask 处理
+// 注意：使用 startsWith 代替精确正则，因为消息末尾可能带有 @mention（如 @_user_1）
 const SESSION_PATTERNS: RegExp[] = [
-  /^(列出|查看)?对话(列表|列别)?$/,
+  /^(列出|查看)?对话(列表|列别)?/,   // 去掉 $ 锚点，兼容末尾 @mention
   /^有哪些对话/,
   /^进入对话/,       // 空格可选：「进入对话 1」「进入对话1」「进入对话1845fff9」
-  /^新对话/,
+  /^新(对话|会话)/,   // 「新对话」「新会话」
   /^当前对话/,
+  /^退出(会话|对话)?$/,  // 「退出」「退出会话」「退出对话」
+  /[^\s]+对话(列表|列别)?$/,  // 「xxx对话」— 按项目关键词筛选对话（如「yuancheng对话」）
   /^\//,             // Claude Code 斜杠命令：/compact /clear 等
+];
+
+/** SWI 工作管家已处理的命令 —— feishu-bridge 收到后应静默跳过，避免重复响应 */
+export const SWI_PATTERNS: RegExp[] = [
+  /^(帮助|help)$/,
+  /^(待办|列表)$/,
+  /^(完成|done)\s*\d+/i,
+];
+
+/** 需要转发到 SWI HTTP API 处理的命令（feishu-bridge 作为代理调用 SWI） */
+export const SWI_FORWARD_PATTERNS: RegExp[] = [
+  /^(生成报告|重新生成报告|表格审核|审核表格|表格报告)$/,
 ];
 
 const INQUIRE_PATTERNS: RegExp[] = [
@@ -62,16 +85,29 @@ const INQUIRE_PATTERNS: RegExp[] = [
 ];
 
 /**
- * 本地快速预判意图。如果匹配成功则直接返回，避免慢速 Ollama 调用。
+ * 本地快速预判意图。如果匹配成功则直接返回，避免 API 调用开销。
  * 只在非常确定的情况下才返回非 null 值。
  */
 function quickClassify(message: string): IntentLabel | null {
-  const trimmed = message.trim();
+  // 预处理：去除 @mention 标记，避免 @_user_1 等干扰分类
+  const trimmed = stripAtMentions(message);
 
   // 会话管理命令 → task（在 executeTask 中处理）
   for (const re of SESSION_PATTERNS) {
     if (re.test(trimmed)) return "task";
   }
+
+  // 包含对话上下文关键词的消息 → task（需要 --resume 续接会话）
+  // 例如：「显示该对话里上一个输入的命令是什么」「刚才说的那个文件在哪」
+  const CONVERSATION_CONTEXT_RE =
+    /(该对话|这个对话|当前对话|会话中|上一个(输入|命令|问题|消息)|刚才说|之前说的|前面说的)/;
+  if (CONVERSATION_CONTEXT_RE.test(trimmed)) return "task";
+
+  // 通用聊天/问答 → task（Claude Code 直接回答，不经过本地指令匹配）
+  // 避免 AI 将聊天问题误判为 simple，导致「命令已执行。」
+  const GENERAL_CHAT_RE =
+    /^(说一下|说说|说下|解释一下|介绍|介绍一下|告诉我|教我|帮我|为什么|为啥|怎么|如何|怎样|什么是|啥是|什么叫|哪家|哪个|哪种|哪里|能不能|可以|有没有|是否|你是|你会|你知道|你知道|请帮|请说|请解释)/;
+  if (GENERAL_CHAT_RE.test(trimmed)) return "task";
 
   for (const re of SIMPLE_PATTERNS) {
     if (re.test(trimmed)) return "simple";
@@ -81,7 +117,7 @@ function quickClassify(message: string): IntentLabel | null {
     if (re.test(trimmed)) return "inquire";
   }
 
-  return null; // 无法确定，交给 Ollama
+  return null; // 无法确定，交给 AI API 分类
 }
 
 export async function classifyIntent(
@@ -92,16 +128,16 @@ export async function classifyIntent(
   const quick = quickClassify(message);
   if (quick !== null) return quick;
 
-  // 2. Ollama 分类
+  // 2. AI 分类（DeepSeek API）
   try {
     const prompt = buildClassifierPrompt(message);
-    const raw = await deps.callOllama(prompt);
+    const raw = await deps.callAI(prompt);
     const label = normalizeLabel(raw);
 
     // 宁可误判为 task（多花 token），不可将危险指令误判为 simple
     return label ?? FALLBACK_LABEL;
   } catch {
-    // Ollama 不可用时 fallback 到 task，不丢消息
+    // AI API 不可用时 fallback 到 task，不丢消息
     return FALLBACK_LABEL;
   }
 }

@@ -1,5 +1,5 @@
-import { writeFile, readFile } from "fs/promises";
-import { existsSync } from "fs";
+import { writeFile } from "fs/promises";
+import { existsSync, readFileSync } from "fs";
 
 export type SessionEntry = {
   sessionId: string;
@@ -103,23 +103,24 @@ export function createSessionRegistry(deps: SessionRegistryDeps): SessionRegistr
     };
   }
 
-  // 启动时从文件加载
+  // 启动时从文件加载（同步读取，避免竞态条件导致消息到达时注册表尚未就绪）
   if (deps.persistPath && existsSync(deps.persistPath)) {
-    loadFromFile(deps.persistPath);
+    loadFromFileSync(deps.persistPath);
   }
 
-  async function loadFromFile(filePath: string): Promise<void> {
+  function loadFromFileSync(filePath: string): void {
     try {
-      const raw = await readFile(filePath, "utf-8");
+      const raw = readFileSync(filePath, "utf-8");
       const data: PersistData = JSON.parse(raw);
       if (data.version === 1 && Array.isArray(data.sessions)) {
         for (const s of data.sessions) {
           const entry = deserialize(s);
           byChatId.set(entry.feishuChatId, entry);
         }
+        console.log(`[SessionRegistry] 已从文件加载 ${data.sessions.length} 个会话: ${filePath}`);
       }
     } catch {
-      // 文件损坏或格式错误，从空注册表开始
+      console.log(`[SessionRegistry] 无法加载会话文件（不存在或格式错误）: ${filePath}`);
     }
   }
 

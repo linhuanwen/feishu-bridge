@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Program Files\\nodejs\\node.exe D:\\tool\\yuancheng\\dist\\permissionBridge.js"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read(**/*)",
+      "Glob(**/*)",
+      "Grep(* *)",
+      "Write(//D/tool/yuancheng/FeiShu/**)",
+      "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "WebSearch",
+      "WebFetch"
+    ]
+  }
+}

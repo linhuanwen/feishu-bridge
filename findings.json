@@ -1,0 +1,32 @@
+[
+  {
+    "file": "src/runClaude.ts",
+    "line": 188,
+    "summary": "DCS/SOS/PM/APC escape sequence handler removed from extractResponse. The regex `[PX^_].*?(\\\\|)` is no longer applied between the Fe/Fs handler (line 188) and the orphan CSI strip (line 192). The new environment config (useConpty:false, NO_COLOR=1, TERM=dumb) makes these sequences unlikely from Claude Code itself, but subprocesses invoked by Claude (npm, git, etc.) may emit ESC-P/ESC-X/ESC-^/ESC-_ sequences that are not caught by the OSC handler (which only matches ESC-] sequences).",
+    "failure_scenario": "A child process under Claude Code emits a Kitty graphics protocol sequence (APC G) or a DCS string through the PTY. The raw escape payload is not stripped and appears as garbage bytes in the response returned to the Feishu user, because the DCS/SOS/PM/APC regex was the only handler for ESC-P, ESC-X, ESC-^, and ESC-_ prefixes."
+  },
+  {
+    "file": "src/runClaude.ts",
+    "line": 217,
+    "summary": "Numbered-options cleaner (`[1-7]\\.[A-Z][a-z]+(?:\\([^)]*\\))?\\s*`) removed from extractResponse. This regex stripped Welcome-screen option lines like '1.Auto (match terminal)', '2.Dark mode (default)', etc. The new code relies on isFreshStart (threshold raised from 2 to 4) to reject the entire output upstream, and on named text patterns (Auto, Dark, Light, Syntax theme) for residual cleanup. Neither covers the digit-prefixed form of the option text directly.",
+    "failure_scenario": "isFreshStart detects only 2-3 of its 6 Welcome patterns (e.g., because ANSI-stripping partially corrupted 'Welcome to Claude Code' text or because the terminal re-flow dropped some keywords). The threshold of 4 is not met, so isFreshStart returns false and the output proceeds to extractResponse. extractResponse removes the named Welcome text patterns (Auto, Dark, Light, Syntax theme) but not the '1.'/'2.'/'3.' prefixes. The response returned to Feishu contains orphan lines like '1. ' and '2. ' mixed with actual Claude output."
+  },
+  {
+    "file": "src/runClaude.ts",
+    "line": 203,
+    "summary": "Trailing-prompt-with-leading-whitespace regex (`\\n\\s*[>⏺●]\\s*$`) removed from extractResponse. The old code had a dedicated final-pass handler for a prompt character preceded by whitespace at the very end of output (e.g., '  > '). The new code only strips prompt lines that start exactly with the prompt character (`^[>⏺●]\\s*$` via multiline flag), missing the case where whitespace precedes the prompt on the last line.",
+    "failure_scenario": "The PTY output ends with a line like '  ⏺  ' (spaces, prompt, spaces) because character-cell rendering left padding before the prompt. The line-start handler does not match (the line begins with spaces). The final text.trim() strips outer whitespace leaving the bare prompt character as the last byte of the response. The user sees a dangling '>' or '⏺' at the end of the Feishu reply."
+  },
+  {
+    "file": "src/main.ts",
+    "line": 166,
+    "summary": "The -p mode fast path for new sessions (`execFile('claude', ['-p', prompt])`) removed from callClaudeForTask. Previously, new sessions (no sessionId) used -p mode: process-exit-based completion detection, no 20-second idle timeout, clean stdout with no ANSI/TUI artifacts, maxBuffer safety (10MB). Now all calls including new sessions go through PTY via runClaudeInteractive, which relies on a 20-second idle timeout heuristic and requires extractResponse to strip TUI artifacts even for first-call sessions. The -p mode survives only as forcePrint fallback, triggered after isFreshStart detects a resume failure.",
+    "failure_scenario": "A new-session task call finishes producing output in 5 seconds, then sits idle waiting for interactive input in the PTY. The 20-second idle timer does not expire until 20 seconds of silence elapse. The total wall-clock time is 25+ seconds versus the equivalent -p mode's 5 seconds. Additionally, the PTY captures ANSI decoration that extractResponse must strip — a task that -p mode sidesteps entirely because -p produces plain text. If extractResponse over-strips (removing legitimate content that happens to match a heuristic), the response is degraded compared to the -p path."
+  },
+  {
+    "file": "src/handleClassifiedMessage.ts",
+    "line": 99,
+    "summary": "The '未知指令' fallback message with available-commands listing removed. Previously, when the Ollama classifier labeled a message as 'simple' but no local command handler matched it (executeSimpleCommand returned null), the system replied with '未知指令。支持的命令：ls <路径>、列出 <路径>、截图、状态、打开 <程序>、关闭 <程序>、运行 <脚本>' and stopped. Now the message falls through to the inquire path (the condition at line 104 matches 'inquire' OR 'simple'), forwarding it directly to Claude Code via the callClaude -p query.",
+    "failure_scenario": "A user sends a message like 'delete all temp files' or 'wipe the build cache' that the Ollama classifier mislabels as 'simple' (e.g., it contains action verbs resembling the local command patterns). No local simple-command handler matches it. In the old code, the message was blocked with a help text listing supported commands. In the new code, the message is forwarded to Claude Code via the inquire path, which passes it to a Claude Code instance that has pre-authorized Bash access (via the safeAllowRules in ensureClaudeSettings: 'Bash(*)' through 'Bash(* * * * *)'). Claude Code receives this as a legitimate user request and treats it as an actionable instruction, executing commands that the old guard would have prevented from ever reaching an AI agent."
+  }
+]
