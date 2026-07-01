@@ -39,7 +39,7 @@
 核心区别：
 - **simple** 由 Bridge 自己处理（纯本地执行，零延迟）。
 - **inquire** 和 **task** 都进入 Claude Code。区别是 inquire 一问一答不保留上下文，task 保留上下文、支持续接、可多轮对话。
-- **Ollama** 只负责判断消息属于哪类，不参与执行。Ollama 挂掉系统照样跑，只是分类靠正则匹配。
+- **DeepSeek** 负责意图分类和 AI 任务执行。不可用时自动降级到正则匹配。
 
 ---
 
@@ -50,7 +50,7 @@
 | Node.js ≥ 18 | 运行 Bridge | ✅ |
 | Claude Code（VSCode 扩展或 CLI） | 执行 AI 任务 | ✅（inquire/task 需要） |
 | 飞书自建应用（WebSocket 长连接） | 消息收发 | ✅ |
-| Ollama（推荐） | 意图分类加速 | 推荐，挂掉会自动降级 |
+| DeepSeek API | 意图分类 + AI 执行 | ✅（inquire/task 需要） |
 
 ---
 
@@ -71,14 +71,7 @@ cp .env.example .env
 npm install
 ```
 
-**3. 安装 Ollama 并拉取模型（推荐）**
-
-```bash
-# Windows: 从 https://ollama.com/download 下载安装程序
-ollama pull qwen2.5:7b
-```
-
-**4. 启动服务**
+**3. 启动服务**
 
 ```bash
 npm start        # 生产模式
@@ -88,7 +81,7 @@ start.bat        # Windows 双击启动
 
 启动后向飞书 Bot 发送消息即可使用。
 
-**5. 运行测试**
+**4. 运行测试**
 
 ```bash
 npm test
@@ -107,10 +100,8 @@ FEISHU_APP_SECRET=xxxxx              # 飞书应用 App Secret
 FEISHU_ALLOWED_OPEN_IDS=ou_xxx,ou_yyy
 
 # ── 可选 ──
-OLLAMA_BASE_URL=http://127.0.0.1:11434    # Ollama 地址
-OLLAMA_MODEL=qwen2.5:7b                   # 分类模型（轻量即可）
 CLAUDE_CLI_PATH=C:\path\to\claude.exe     # Claude CLI 路径（不设则自动发现）
-FEISHU_TASK_TIMEOUT_MS=300000             # task 超时毫秒数（默认 5 分钟）
+FEISHU_TASK_TIMEOUT_MS=900000             # task 超时毫秒数（默认 15 分钟）
 FEISHU_NOTIFY_CHAT_ID=oc_xxx              # 系统通知目标群（健康检查/崩溃通知/权限卡片）
 FEISHU_PERMISSION_PORT=19384              # 权限桥 HTTP 端口
 FEISHU_LOG_DIR=./logs                     # 日志目录
@@ -266,7 +257,7 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 │  3. 白名单校验：不在白名单 → 回复拒绝并给出 open_id              │
 │  4. 意图分类：                                                 │
 │     ├─ 正则快速匹配（明显命令直接分类，不调 AI）                  │
-│     └─ Ollama 回退（正则无法确定时调用，Ollama 挂掉则默认 task） │
+│     └─ DeepSeek 回退（正则无法确定时调用，API 挂掉则默认 task） │
 │                                                               │
 │  5. 路由执行：                                                 │
 │     ├─ simple                                                  │
@@ -277,7 +268,7 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 │     │                                                         │
 │     └─ task                                                   │
 │         ├─ 元命令（列出对话/进入对话/切换项目）→ 本地处理         │
-│         └─ 任务消息 → callClaudeForTask(PTY, --resume), 5min 超时│
+│         └─ 任务消息 → callClaudeForTask(PTY, --resume), 15min 超时 │
 │                                                               │
 │  6. 回复：文本/富文本/图片 + 撤回临时状态消息                    │
 │                                                               │
@@ -290,7 +281,7 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 |---|---|---|---|
 | 调用 Claude Code | ❌ | ✅ 单次 | ✅ 多轮 |
 | 会话上下文 | 无 | 无 | 有（--resume） |
-| 超时 | 秒级 | 60s | 5min（可配） |
+| 超时 | 秒级 | 60s | 15min（可配） |
 | 触发权限卡片 | simple 自身有门禁 | ✅ PTY → PreToolUse | ✅ PTY → PreToolUse |
 | 典型场景 | ls、截图、打开程序 | 读文件、搜索、解释代码 | 重构、写功能、多轮编程 |
 
@@ -307,8 +298,8 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 │                   Feishu Bridge                       │
 │                                                       │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │ 意图分类器   │  │ 消息管道      │  │ 会话注册表  │  │
-│  │ 正则+Ollama │  │ 三类路由      │  │ 内存+磁盘   │  │
+│  │ 意图分类器    │  │ 消息管道      │  │ 会话注册表  │  │
+│  │ 正则+DeepSeek│  │ 三类路由      │  │ 内存+磁盘   │  │
 │  │             │  │              │  │ 30min 过期  │  │
 │  └─────────────┘  └──────┬───────┘  └─────────────┘  │
 │                          │                            │
@@ -341,8 +332,8 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 |---|---|
 | `src/main.ts` | 启动入口，组装所有依赖，HTTP 权限服务器，健康检查 |
 | `src/handleClassifiedMessage.ts` | 消息路由分发（所有消息的入口函数） |
-| `src/classifyIntent.ts` | 意图分类（正则快速匹配 + Ollama 回退） |
-| `src/createOllamaClassifier.ts` | Ollama HTTP 客户端（薄封装） |
+| `src/classifyIntent.ts` | 意图分类（正则快速匹配 + DeepSeek 回退） |
+| `src/createDeepSeekClassifier.ts` | DeepSeek API 客户端（意图分类） |
 | `src/executeSimpleCommand.ts` | 本地命令执行（ls/截图/启停程序/运行脚本） |
 | `src/executeInquire.ts` | 单次 Claude 查询（构建 prompt + 60s 超时） |
 | `src/executeTask.ts` | 多轮会话管理与执行（元命令 + --resume 续接） |
@@ -354,7 +345,7 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 | `src/createFeishuBridge.ts` | 飞书 SDK WebSocket 连接与事件注册 |
 | `src/createPermissionLogger.ts` | 权限决策日志 |
 | `src/createClaudeSettingsWriter.ts` | 自动生成项目 .claude/settings.json |
-| `src/createHealthChecker.ts` | 定期健康检查（Ollama + Claude CLI） |
+| `src/createHealthChecker.ts` | 定期健康检查（DeepSeek + Claude CLI） |
 | `src/withAutoRestart.ts` | 崩溃自动重启（最多 3 次） |
 | `src/discoverClaudeSessions.ts` | 扫描磁盘发现所有 Claude Code 会话 |
 
@@ -371,8 +362,8 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 ### AI 任务失败
 
 1. **Claude Code CLI 不可用**：确认 VSCode 安装了 Claude Code 扩展，或设置 `CLAUDE_CLI_PATH`
-2. **Ollama 不可用**：不影响核心功能，分类降级到正则 + 默认 task
-3. **task 超时**：调大 `FEISHU_TASK_TIMEOUT_MS`（默认 300000 = 5 分钟）
+2. **DeepSeek API 不可用**：不影响核心功能，分类降级到正则 + 默认 task
+3. **task 超时**：调大 `FEISHU_TASK_TIMEOUT_MS`（默认 900000 = 15 分钟）
 
 ### 权限卡片不弹出
 
@@ -398,8 +389,8 @@ FEISHU_LOW_RISK_ACTIONS=list_dir,read_file,screenshot
 ### 调整意图分类
 
 - **正则规则**：修改 `src/classifyIntent.ts` 中的 `SIMPLE_PATTERNS` / `INQUIRE_PATTERNS` / `SESSION_PATTERNS`
-- **Ollama prompt**：修改同文件的 `buildClassifierPrompt()`
-- **切换 Ollama 模型**：环境变量 `OLLAMA_MODEL`
+- **DeepSeek prompt**：修改 `src/createDeepSeekClassifier.ts` 中的 `buildClassifierPrompt()`
+- **切换 DeepSeek 模型**：修改 `src/createDeepSeekClassifier.ts` 中的默认模型
 
 ### 调整权限规则
 
